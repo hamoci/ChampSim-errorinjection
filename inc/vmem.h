@@ -17,6 +17,9 @@
 #ifndef VMEM_H
 #define VMEM_H
 
+/* Hamoci's Header Additions */
+#include <set>
+/* End of Hamoci's Header Additions */
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -33,6 +36,19 @@ using pte_entry = champsim::data::size<long long, std::ratio<8>>;
 
 class VirtualMemory
 {
+
+/* Hamoci's Error Page Management Logic */
+// private:
+//   std::set<champsim::page_number> error_pages;
+// public:
+//   champsim::chrono::clock::duration error_page_penalty;
+//   void init_error_page_penalty(void);
+//   void add_error_page(champsim::page_number page);
+//   void remove_error_page(champsim::page_number page);
+//   bool is_error_page(champsim::page_number page) const;
+//   void inject_error_all_page(void);
+/* End of Hamoci's Error Page Management Logic */
+
 private:
   std::map<std::pair<uint32_t, champsim::page_number>, champsim::page_number> vpage_to_ppage_map;
   std::map<std::tuple<uint32_t, uint32_t, champsim::address_slice<champsim::dynamic_extent>>, champsim::address> page_table;

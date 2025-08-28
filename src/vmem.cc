@@ -44,6 +44,7 @@ VirtualMemory::VirtualMemory(champsim::data::bytes page_table_page_size, std::si
   if (required_bits > champsim::data::bits{champsim::lg2(dram.size().count())}) {
     fmt::print("[VMEM] WARNING: physical memory size is smaller than virtual memory size.\n"); // LCOV_EXCL_LINE
   }
+  // init_error_page_penalty(); // Hamoci's Addition
   populate_pages();
   shuffle_pages();
 }
@@ -107,6 +108,9 @@ std::size_t VirtualMemory::available_ppages() const { return (ppage_free_list.si
 std::pair<champsim::page_number, champsim::chrono::clock::duration> VirtualMemory::va_to_pa(uint32_t cpu_num, champsim::page_number vaddr)
 {
   auto [ppage, fault] = vpage_to_ppage_map.try_emplace({cpu_num, champsim::page_number{vaddr}}, ppage_front());
+  //page_number{vaddr}이 vpage_to_ppage_map에 존재하지 않으면 {cpu_num, page_number{faddr}}를 Key, ppage_front를 value로 추가
+  // ppage_front는 Physical Page Free List의 Head를 가져옴
+  //ppage에는 삽입된 항목의 iterator가, fault에는 삽입이 일어났는지 여부가 저장
 
   // this vpage doesn't yet have a ppage mapping
   if (fault) {
@@ -115,10 +119,22 @@ std::pair<champsim::page_number, champsim::chrono::clock::duration> VirtualMemor
 
   auto penalty = fault ? minor_fault_penalty : champsim::chrono::clock::duration::zero();
 
+  /* Hamoci's Error Page Management Logic */
+  // if (is_error_page(champsim::page_number{ppage->second})) {
+  //   penalty += error_page_penalty;
+  //   remove_error_page(champsim::page_number{ppage->second});
+  // }
+  //잘 생각해보니, 좀 더 나은 방법이 있을 것 같음
+  //만약 va_to_pa, get_pte_pa만 Latency를 추가하게 되면, 즉 변환 과정에 Latency를 추가하게 되면
+  //TLB Hit 시 Latency가 반영되지 않음
+  //차라리 이렇게 할 바엔 실제 Physical Page에 접근하는 순간, 즉 Cache에 Data를 요청하기 직전에
+  //Error Page에 대한 요청이라면 Error를 수정하는 Latency를 추가해주는 쪽이 더 정교할듯
+  /* End of Hamoci's Error Page Management Logic */
   if constexpr (champsim::debug_print) {
     fmt::print("[VMEM] {} paddr: {} vpage: {} fault: {}\n", __func__, ppage->second, champsim::page_number{vaddr}, fault);
   }
 
+  //ppage->second (Physical Page Number), Penalty가 전달됨
   return std::pair{ppage->second, penalty};
 }
 
@@ -151,6 +167,21 @@ std::pair<champsim::address, champsim::chrono::clock::duration> VirtualMemory::g
   if (!fault) {
     penalty = champsim::chrono::clock::duration::zero();
   }
-
+    /* Hamoci's Error Page Management Logic */
+  // if (is_error_page(champsim::page_number{ppage->second})) {
+  //   penalty += error_page_penalty;
+  //   remove_error_page(champsim::page_number{ppage->second});
+  // }
+  /* End of Hamoci's Error Page Management Logic */
+  
   return {paddr, penalty};
 }
+
+/* Hamoci's Error Page Management Logic */
+// void VirtualMemory::init_error_page_penalty(void) {
+//   error_page_penalty = minor_fault_penalty * 4; // CPU Clock Period에 직접 접근하기 어려워, 간접적으로 사용
+// }
+// void VirtualMemory::add_error_page(champsim::page_number page) { error_pages.insert(page); }
+// void VirtualMemory::remove_error_page(champsim::page_number page) { error_pages.erase(page); }
+// bool VirtualMemory::is_error_page(champsim::page_number page) const { return error_pages.find(page) != error_pages.end(); }
+/* End of Hamoci's Error Page Management Logic */

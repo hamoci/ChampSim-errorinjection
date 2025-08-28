@@ -29,8 +29,8 @@
 #include "phase_info.h"
 #include "tracereader.h"
 
-constexpr int DEADLOCK_CYCLE{10000}; //hamoci : Deadlock condition revise
-//constexpr int DEADLOCK_CYCLE{500}; 
+constexpr int DEADLOCK_CYCLE{20000}; //hamoci : Deadlock condition revise
+//constexpr int DEADLOCK_CYCLE{500}; //Original Code
 
 const auto start_time = std::chrono::steady_clock::now();
 
