@@ -110,53 +110,6 @@ long DRAM_CHANNEL::operate()
 {
   long progress{0};
 
-  // Hamoci's Probabilistic Memory Error Generation
-  //
-  // HOW TO CONTROL ERROR INJECTION:
-  // 1. Change 'base_error_probability' to adjust error rate:
-  //    - 0.001  = 0.1% chance every check_interval cycles  (HIGH ERROR RATE)
-  //    - 0.0005 = 0.05% chance every check_interval cycles (MEDIUM ERROR RATE)
-  //    - 0.0001 = 0.01% chance every check_interval cycles (LOW ERROR RATE)
-  //    - 0.0    = 0% chance (NO ERRORS)
-  //
-  // 2. Change 'error_check_interval' to adjust check frequency:
-  //    - 1000  = Check every 1K cycles  (FREQUENT CHECKS)
-  //    - 5000  = Check every 5K cycles  (NORMAL)
-  //    - 10000 = Check every 10K cycles (LESS FREQUENT)
-  //
-  // 3. Change 'gen(12345)' seed for different error patterns:
-  //    - Use same seed for identical results across runs
-  //    - Use different seed for different error patterns
-  //
-  // 4. Set 'enable_error_injection = false' to completely disable errors
-  //
-  
-  static std::mt19937 gen(54321);  // CHANGE SEED HERE for different error patterns
-  static std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
-  static std::uniform_int_distribution<uint64_t> addr_dist(0x10000000, 0x80000000); // 256MB-2GB range
-  
-  // ERROR CONTROL PARAMETERS - MODIFY THESE:
-  static const uint64_t error_check_interval = 50000;   // Check every 50K cycles (reduced)
-  static const double base_error_probability = 0.05;   // 0.1% chance (reduced since we have preloaded pages)
-  static const uint64_t warmup_cycles = 10000;          // No errors during first 10K cycles
-  static const bool enable_error_injection = false;     // DISABLED - using preloaded pages only
-  
-  uint64_t current_cycle = current_time.time_since_epoch() / clock_period;
-  
-  // Skip error injection if disabled, during warmup, or not at check interval
-  if (enable_error_injection && current_cycle > warmup_cycles && current_cycle % error_check_interval == 0) {
-    
-    if (prob_dist(gen) < base_error_probability) {
-      // Generate random error page
-      uint64_t error_addr = addr_dist(gen) & ~0xFFF;  // Align to page boundary
-      auto page_num = ErrorPageManager::get_page_number(champsim::address{error_addr});
-      ErrorPageManager::get_instance().add_error_page(page_num);
-      
-      fmt::print("[DRAM_ERROR] Cycle {}: Probabilistic error injected at page 0x{:x} (prob: {:.4f}%%)\n", 
-                 current_cycle, page_num.to<uint64_t>(), base_error_probability * 100);
-    }
-  }
-
   if (warmup) {
     for (auto& entry : RQ) {
       if (entry.has_value()) {
@@ -177,6 +130,12 @@ long DRAM_CHANNEL::operate()
       entry.reset();
     }
   }
+
+  /* Hamoci : Random Error Injection */
+  if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM) {
+    ErrorPageManager::get_instance().inject_error_at_random();
+  }
+  /* Hamoci : End of Injection */
 
   check_write_collision();
   check_read_collision();
@@ -297,6 +256,7 @@ long DRAM_CHANNEL::populate_dbus()
 {
   long progress{0};
 
+  //Hamoci : std::min_element을 통해 Ready Time이 작은 Bank Request 먼저 처리함
   auto iter_next_process = std::min_element(std::begin(bank_request), std::end(bank_request),
                                             [](const auto& lhs, const auto& rhs) { return !rhs.valid || (lhs.valid && lhs.ready_time < rhs.ready_time); });
   if (iter_next_process->valid && iter_next_process->ready_time <= current_time) {
@@ -392,23 +352,22 @@ DRAM_CHANNEL::queue_type::iterator DRAM_CHANNEL::schedule_packet()
 long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
 {
   long progress{0};
+  static long int dram_access_count{0};
   if (pkt->has_value() && pkt->value().ready_time <= current_time) {
     auto op_row = address_mapping.get_row(pkt->value().address);
     auto op_idx = bank_request_index(pkt->value().address);
 
     if (!bank_request[op_idx].valid && !bank_request[op_idx].under_refresh) {
       bool row_buffer_hit = (bank_request[op_idx].open_row.has_value() && *(bank_request[op_idx].open_row) == op_row);
-
+      dram_access_count++;
       // Hamoci's Error Page Check - Extract page number and check if it's an error page
       auto page_num = ErrorPageManager::get_page_number(pkt->value().address);
       auto error_latency = champsim::chrono::clock::duration{};
       if (ErrorPageManager::get_instance().is_error_page(page_num)) {
         error_latency = ErrorPageManager::get_instance().get_error_latency();
-        // DON'T remove error page - keep it for repeated accesses
-        
-        // Always print error page access (not just debug mode)
-        fmt::print("[DRAM_ERROR_PAGE] Error page access detected! address={} page_num=0x{:x} additional_latency={} cycles\n", 
-                   pkt->value().address, page_num.to<uint64_t>(), error_latency.count() / clock_period.count());
+        ErrorPageManager::get_instance().remove_error_page(page_num);
+        fmt::print("[DRAM_ERROR_PAGE] Error page access detected! address={} page_num=0x{:x} additional_latency={} cycles, dram access ={}\n", 
+                   pkt->value().address, page_num.to<uint64_t>(), error_latency.count() / clock_period.count(), dram_access_count);
       }
 
       // this bank is now busy
@@ -458,18 +417,31 @@ void MEMORY_CONTROLLER::initialize()
   // Hamoci's Error Page Manager initialization
   // Set default error latency (e.g., 500 cycles for memory error correction)
   ErrorPageManager::get_instance().set_error_latency(500 * clock_period);
-  
-  // Pre-load error pages at simulation start
-  size_t preload_error_count = 50000;  // CHANGE THIS to control pre-loaded error page count
-  ErrorPageManager::get_instance().preload_error_pages(preload_error_count);
-  
-  fmt::print("[ERROR_PAGE_MANAGER] Initialized with PRELOADED error pages\n");
+  //ErrorPageManager::get_instance().set_mode(ErrorPageManagerMode::ALL_ON);
+  ErrorPageManager::get_instance().set_mode(ErrorPageManagerMode::RANDOM);
+  ErrorPageManager::get_instance().set_base_error_probability(0.01 / 100.0);
+  ErrorPageManager::get_instance().set_errors_per_interval(1);
+
+  fmt::print("[ERROR_PAGE_MANAGER] Error latency: {} cycles\n",
+             ErrorPageManager::get_instance().get_error_latency().count() / clock_period.count());
   fmt::print("[ERROR_PAGE_MANAGER] Random seed: 54321 (fixed for preload reproducibility)\n");
-  fmt::print("[ERROR_PAGE_MANAGER] Pre-loaded error pages: {}\n", preload_error_count);
-  fmt::print("[ERROR_PAGE_MANAGER] Error latency: 500 cycles\n");
-  fmt::print("[ERROR_PAGE_MANAGER] Additional probabilistic injection: 5%% every 5000 cycles\n");
-  fmt::print("[ERROR_PAGE_MANAGER] Total error pages: {}\n", 
+  
+  if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::ALL_ON) {
+    uint64_t all_error_pages_count = this->size().count() >> LOG2_PAGE_SIZE;
+    ErrorPageManager::get_instance().all_error_pages_on(all_error_pages_count);
+    fmt::print("[ERROR_PAGE_MANAGER] All error pages on: {}\n", all_error_pages_count);
+    fmt::print("[ERROR_PAGE_MANAGER] Total error pages: {}\n", 
              ErrorPageManager::get_instance().get_error_page_count());
+  }
+  else if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM) {
+    fmt::print("[ERROR_PAGE_MANAGER] Error pages random\n");
+    fmt::print("[ERROR_PAGE_MANAGER] Error Probability: {}%\n", 
+      ErrorPageManager::get_instance().get_base_error_probability() * 100);
+    fmt::print("[ERROR_PAGE_MANAGER] Error Pages per Interval: {}\n",
+      ErrorPageManager::get_instance().get_errors_per_interval());
+  } else {
+    fmt::print("[ERROR_PAGE_MANAGER] Error pages off\n");
+  }
 }
 
 void DRAM_CHANNEL::initialize() {}

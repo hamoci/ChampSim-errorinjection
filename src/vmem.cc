@@ -108,13 +108,13 @@ std::size_t VirtualMemory::available_ppages() const { return (ppage_free_list.si
 std::pair<champsim::page_number, champsim::chrono::clock::duration> VirtualMemory::va_to_pa(uint32_t cpu_num, champsim::page_number vaddr)
 {
   auto [ppage, fault] = vpage_to_ppage_map.try_emplace({cpu_num, champsim::page_number{vaddr}}, ppage_front());
-  //page_number{vaddr}이 vpage_to_ppage_map에 존재하지 않으면 {cpu_num, page_number{faddr}}를 Key, ppage_front를 value로 추가
+  //page_number{vaddr}이 vpage_to_ppage_map에 존재하지 않으면 {cpu_num, page_number{vaddr}}를 Key, ppage_front를 value로 추가
   // ppage_front는 Physical Page Free List의 Head를 가져옴
   //ppage에는 삽입된 항목의 iterator가, fault에는 삽입이 일어났는지 여부가 저장
-
   // this vpage doesn't yet have a ppage mapping
   if (fault) {
     ppage_pop();
+    ErrorPageManager::get_instance().add_current_ppage(ppage->second); //Hamoci's Addition
   }
 
   auto penalty = fault ? minor_fault_penalty : champsim::chrono::clock::duration::zero();
@@ -152,6 +152,7 @@ std::pair<champsim::address, champsim::chrono::clock::duration> VirtualMemory::g
   // this PTE doesn't yet have a mapping
   if (fault) {
     next_pte_page++;
+    ErrorPageManager::get_instance().add_current_ppage(champsim::page_number{ppage->second}); //Hamoci's Addition
   }
 
   auto offset = get_offset(vaddr, level);
