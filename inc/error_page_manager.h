@@ -27,6 +27,7 @@ private:
     std::unordered_set<uint64_t> current_ppage; 
     ErrorPageManagerMode mode;
     champsim::chrono::clock::duration error_latency_penalty{};
+    uint32_t error_latency_cycles{}; // Store original CPU cycle value
     static std::unique_ptr<ErrorPageManager> instance;
 
 //For Random Error Injection
@@ -34,7 +35,11 @@ private:
     std::mt19937 gen{54321};
     std::uniform_real_distribution<double> prob_dist{0.0, 1.0};
     double base_error_probability{0.001};
-    uint32_t errors_per_interval{1}; 
+    uint32_t errors_per_interval{1};
+
+// Error Statistics
+private:
+    uint64_t total_error_count{0};
 
 public:
     // Singleton pattern
@@ -59,7 +64,9 @@ public:
 
     // Latency management
     void set_error_latency(champsim::chrono::clock::duration latency) { error_latency_penalty = latency; }
+    void set_error_latency_cycles(uint32_t cycles) { error_latency_cycles = cycles; }
     champsim::chrono::clock::duration get_error_latency() const { return error_latency_penalty; }
+    uint32_t get_error_latency_cycles() const { return error_latency_cycles; }
     
     // Random error injection settings
     void set_base_error_probability(double prob) { base_error_probability = prob; }
@@ -87,6 +94,15 @@ public:
     void all_error_pages_on(uint64_t page_num);
     // Inject Random Error 
     void inject_error_at_random(void);
+    
+    // Error Statistics
+    void record_error_access(void) {
+        total_error_count++;
+    }
+    uint64_t get_total_error_count() const { return total_error_count; }
+    void reset_error_stats() {
+        total_error_count = 0;
+    }
     
     // For debugging
     void print_error_pages() const;

@@ -312,7 +312,7 @@ def decorate_queues(caches, ptws, pmem):
 def get_queue_info(ul_pairs, decoration):
     return [decoration.get(ll) for ll,_ in ul_pairs]
 
-def get_instantiation_lines(cores, caches, ptws, pmem, vmem, build_id):
+def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager, build_id):
     '''
     Generate the lines for a C++ file that instantiates a configuration.
     '''
@@ -391,6 +391,26 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, build_id):
     yield from cache_instantiation_body
     yield from core_instantiation_body
     yield '{'
+    yield '  // Initialize Error Page Manager'
+    yield '  auto& epm = ErrorPageManager::get_instance();'
+    if error_page_manager.get('mode') == 'OFF':
+        yield '  epm.set_mode(ErrorPageManagerMode::OFF);'
+    elif error_page_manager.get('mode') == 'ALL_ON':
+        yield '  epm.set_mode(ErrorPageManagerMode::ALL_ON);'
+    elif error_page_manager.get('mode') == 'RANDOM':
+        yield '  epm.set_mode(ErrorPageManagerMode::RANDOM);'
+    else:
+        yield '  epm.set_mode(ErrorPageManagerMode::OFF);'
+    
+    if 'error_latency_penalty' in error_page_manager:
+        yield f'  epm.set_error_latency(champsim::chrono::picoseconds{{{error_page_manager["error_latency_penalty"] * global_clock_period}}});'
+        yield f'  epm.set_error_latency_cycles({error_page_manager["error_latency_penalty"]});'
+    
+    if 'error_probability' in error_page_manager:
+        yield f'  epm.set_base_error_probability({error_page_manager["error_probability"]});'
+        
+    if 'errors_per_interval' in error_page_manager:
+        yield f'  epm.set_errors_per_interval({error_page_manager["errors_per_interval"]});'
     yield '}'
     yield ''
 
@@ -420,6 +440,7 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, build_id):
 def get_instantiation_header(num_cpus, env, build_id):
     yield '#include "environment.h"'
     yield '#include "vmem.h"'
+    yield '#include "error_page_manager.h"'
     yield '#include <forward_list>'
     yield 'template <>'
     struct_body = (

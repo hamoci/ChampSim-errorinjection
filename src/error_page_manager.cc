@@ -22,8 +22,8 @@ void ErrorPageManager::all_error_pages_on(uint64_t page_num) {
 
 void ErrorPageManager::print_error_pages() const {
     fmt::print("[ERROR_PAGE_MANAGER] Total error pages: {}\n", error_pages.size());
-    fmt::print("[ERROR_PAGE_MANAGER] Error latency penalty: {} cycles\n", 
-               error_latency_penalty.count());
+    fmt::print("[ERROR_PAGE_MANAGER] Error latency penalty: {} CPU cycles\n", 
+               error_latency_cycles);
     
     if (!error_pages.empty()) {
         fmt::print("[ERROR_PAGE_MANAGER] Error page numbers: ");

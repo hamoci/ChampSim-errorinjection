@@ -366,8 +366,10 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       if (ErrorPageManager::get_instance().is_error_page(page_num)) {
         error_latency = ErrorPageManager::get_instance().get_error_latency();
         ErrorPageManager::get_instance().remove_error_page(page_num);
-        fmt::print("[DRAM_ERROR_PAGE] Error page access detected! address={} page_num=0x{:x} additional_latency={} cycles, dram access ={}\n", 
-                   pkt->value().address, page_num.to<uint64_t>(), error_latency.count() / clock_period.count(), dram_access_count);
+        // Record error statistics
+        ErrorPageManager::get_instance().record_error_access();
+        fmt::print("[DRAM_ERROR_PAGE] Error page access detected! address={} page_num=0x{:x} additional_latency={} CPU cycles, dram access ={}\n", 
+                   pkt->value().address, page_num.to<uint64_t>(), ErrorPageManager::get_instance().get_error_latency_cycles(), dram_access_count);
       }
 
       // this bank is now busy
@@ -377,9 +379,9 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       
       // Print timing info for verification
       if (error_latency > champsim::chrono::clock::duration{}) {
-        fmt::print("[DRAM_TIMING] Normal latency: {} cycles, Error latency: {} cycles, Total: {} cycles\n", 
+        fmt::print("[DRAM_TIMING] Normal latency: {} DRAM cycles, Error latency: {} CPU cycles, Total: {} DRAM cycles\n", 
                    base_latency.count() / clock_period.count(),
-                   error_latency.count() / clock_period.count(),
+                   ErrorPageManager::get_instance().get_error_latency_cycles(),
                    total_latency.count() / clock_period.count());
       }
       
@@ -416,14 +418,13 @@ void MEMORY_CONTROLLER::initialize()
 
   // Hamoci's Error Page Manager initialization
   // Set default error latency (e.g., 500 cycles for memory error correction)
-  ErrorPageManager::get_instance().set_error_latency(500 * clock_period);
-  //ErrorPageManager::get_instance().set_mode(ErrorPageManagerMode::ALL_ON);
-  ErrorPageManager::get_instance().set_mode(ErrorPageManagerMode::RANDOM);
-  ErrorPageManager::get_instance().set_base_error_probability(0.01 / 100.0);
-  ErrorPageManager::get_instance().set_errors_per_interval(1);
+  // ErrorPageManager::get_instance().set_error_latency(500 * clock_period);
+  // ErrorPageManager::get_instance().set_mode(ErrorPageManagerMode::RANDOM);
+  // ErrorPageManager::get_instance().set_base_error_probability(0.01 / 100.0);
+  // ErrorPageManager::get_instance().set_errors_per_interval(1);
 
-  fmt::print("[ERROR_PAGE_MANAGER] Error latency: {} cycles\n",
-             ErrorPageManager::get_instance().get_error_latency().count() / clock_period.count());
+  fmt::print("[ERROR_PAGE_MANAGER] Error latency: {} CPU cycles\n",
+             ErrorPageManager::get_instance().get_error_latency_cycles());
   fmt::print("[ERROR_PAGE_MANAGER] Random seed: 54321 (fixed for preload reproducibility)\n");
   
   if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::ALL_ON) {
@@ -471,6 +472,12 @@ void MEMORY_CONTROLLER::end_phase(unsigned cpu)
   for (auto& chan : channels) {
     chan.end_phase(cpu);
   }
+  
+  // Print Error Page Statistics
+  auto& error_manager = ErrorPageManager::get_instance();
+  fmt::print("\n=== ERROR PAGE STATISTICS ===\n");
+  fmt::print("Total Error Accesses: {}\n", error_manager.get_total_error_count());
+  fmt::print("==============================\n");
 }
 
 void DRAM_CHANNEL::end_phase(unsigned /*cpu*/) { roi_stats = sim_stats; }

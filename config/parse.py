@@ -292,6 +292,11 @@ class NormalizedConfiguration:
         if verbose:
             print('P: vmem', list(self.vmem.keys()))
 
+        self.error_page_manager = util.chain(config_file.get('error_page_manager', {}), defaults.error_page_manager_defaults())
+
+        if verbose:
+            print('P: error_page_manager', list(self.error_page_manager.keys()))
+
         self.root = util.subdict(config_file,
             ('block_size', 'page_size', 'heartbeat_frequency')
         )
@@ -434,7 +439,8 @@ class NormalizedConfiguration:
             'caches': tuple(caches.values()),
             'ptws': tuple(ptws.values()),
             'pmem': pmem,
-            'vmem': vmem
+            'vmem': vmem,
+            'error_page_manager': self.error_page_manager
         }
         module_info = {
             'repl': util.combine_named(*(c['_replacement_data'] for c in caches.values()), replacement_context.find_all()),

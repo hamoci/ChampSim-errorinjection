@@ -89,3 +89,12 @@ def list_defaults(cores, caches):
     ''' Generate the down-path defaults for all cores, merging with priority towards lower levels '''
     paths = itertools.chain(*(list_defaults_for_core(cpu, caches) for cpu in cores))
     yield from util.combine_named(reversed(list(roundrobin(*paths)))).values()
+
+def error_page_manager_defaults():
+    ''' Generate the default error page manager configuration '''
+    return {
+        'mode': 'OFF',
+        'error_latency_penalty': 0,
+        'error_probability': 0.0,
+        'errors_per_interval': 1
+    }
