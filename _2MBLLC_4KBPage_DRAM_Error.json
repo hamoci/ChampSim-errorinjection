@@ -1,7 +1,7 @@
 {
-  "executable_name": "champsim_2mb_ptw-dram",
+  "executable_name": "champsim_4kb_error",
   "block_size": 64,
-  "page_size": 2097152,
+  "page_size": 4096,
   "heartbeat_frequency": 10000000,
   "num_cores": 1,
 
@@ -128,6 +128,8 @@
 
   "PTW": {
     "lower_level": "DRAM",
+    "pscl5_set": 1,
+    "pscl5_way": 2,
     "pscl4_set": 1,
     "pscl4_way": 4,
     "pscl3_set": 2,
@@ -179,8 +181,15 @@
 
   "virtual_memory": {
     "pte_page_size": 4096,
-    "num_levels": 4,
-    "minor_fault_penalty": 2081,
+    "num_levels": 5,
+    "minor_fault_penalty": 200,
     "randomization": 1
+  },
+
+  "error_page_manager": {
+    "mode": "RANDOM",
+    "error_latency_penalty": 694,
+    "error_probability": 0.0001,
+    "errors_per_interval": 1
   }
 }

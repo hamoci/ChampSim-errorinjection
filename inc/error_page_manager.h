@@ -14,7 +14,6 @@
 #include "champsim.h"
 
 enum class ErrorPageManagerMode {
-    //PRELOADED,
     ALL_ON,
     RANDOM,
     OFF,
@@ -27,7 +26,6 @@ private:
     std::unordered_set<uint64_t> current_ppage; 
     ErrorPageManagerMode mode;
     champsim::chrono::clock::duration error_latency_penalty{};
-    uint32_t error_latency_cycles{}; // Store original CPU cycle value
     static std::unique_ptr<ErrorPageManager> instance;
 
 //For Random Error Injection
@@ -64,10 +62,8 @@ public:
 
     // Latency management
     void set_error_latency(champsim::chrono::clock::duration latency) { error_latency_penalty = latency; }
-    void set_error_latency_cycles(uint32_t cycles) { error_latency_cycles = cycles; }
     champsim::chrono::clock::duration get_error_latency() const { return error_latency_penalty; }
-    uint32_t get_error_latency_cycles() const { return error_latency_cycles; }
-    
+
     // Random error injection settings
     void set_base_error_probability(double prob) { base_error_probability = prob; }
     void set_errors_per_interval(uint32_t count) { errors_per_interval = count; }

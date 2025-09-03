@@ -404,7 +404,6 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
     
     if 'error_latency_penalty' in error_page_manager:
         yield f'  epm.set_error_latency(champsim::chrono::picoseconds{{{error_page_manager["error_latency_penalty"] * global_clock_period}}});'
-        yield f'  epm.set_error_latency_cycles({error_page_manager["error_latency_penalty"]});'
     
     if 'error_probability' in error_page_manager:
         yield f'  epm.set_base_error_probability({error_page_manager["error_probability"]});'

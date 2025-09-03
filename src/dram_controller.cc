@@ -368,8 +368,9 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
         ErrorPageManager::get_instance().remove_error_page(page_num);
         // Record error statistics
         ErrorPageManager::get_instance().record_error_access();
-        fmt::print("[DRAM_ERROR_PAGE] Error page access detected! address={} page_num=0x{:x} additional_latency={} CPU cycles, dram access ={}\n", 
-                   pkt->value().address, page_num.to<uint64_t>(), ErrorPageManager::get_instance().get_error_latency_cycles(), dram_access_count);
+        //for debug
+        //fmt::print("[DRAM_ERROR_PAGE] Error page access detected! address={} page_num=0x{:x} additional_latency={} CPU cycles, dram access ={}\n", 
+                  //  pkt->value().address, page_num.to<uint64_t>(), ErrorPageManager::get_instance().get_error_latency_cycles(), dram_access_count);
       }
 
       // this bank is now busy
@@ -378,12 +379,12 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       auto total_latency = base_latency + error_latency;
       
       // Print timing info for verification
-      if (error_latency > champsim::chrono::clock::duration{}) {
-        fmt::print("[DRAM_TIMING] Normal latency: {} DRAM cycles, Error latency: {} CPU cycles, Total: {} DRAM cycles\n", 
-                   base_latency.count() / clock_period.count(),
-                   ErrorPageManager::get_instance().get_error_latency_cycles(),
-                   total_latency.count() / clock_period.count());
-      }
+      // if (error_latency > champsim::chrono::clock::duration{}) {
+      //   fmt::print("[DRAM_TIMING] Normal latency: {} DRAM cycles, Error latency: {} CPU cycles, Total: {} DRAM cycles\n", 
+      //              base_latency.count() / clock_period.count(),
+      //              ErrorPageManager::get_instance().get_error_latency_cycles(),
+      //              total_latency.count() / clock_period.count());
+      // }
       
       bank_request[op_idx] = {true,  row_buffer_hit,        false,
                               false, std::optional{op_row}, 
@@ -423,8 +424,8 @@ void MEMORY_CONTROLLER::initialize()
   // ErrorPageManager::get_instance().set_base_error_probability(0.01 / 100.0);
   // ErrorPageManager::get_instance().set_errors_per_interval(1);
 
-  fmt::print("[ERROR_PAGE_MANAGER] Error latency: {} CPU cycles\n",
-             ErrorPageManager::get_instance().get_error_latency_cycles());
+  fmt::print("[ERROR_PAGE_MANAGER] Error latency: {} \n",
+             ErrorPageManager::get_instance().get_error_latency());
   fmt::print("[ERROR_PAGE_MANAGER] Random seed: 54321 (fixed for preload reproducibility)\n");
   
   if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::ALL_ON) {
@@ -701,42 +702,3 @@ void DRAM_CHANNEL::print_deadlock()
   champsim::range_print_deadlock(WQ, "WQ", q_writer, q_entry_pack);
 }
 // LCOV_EXCL_STOP
-
-// Hamoci's Error Page Management Implementation
-void MEMORY_CONTROLLER::add_error_page(uint64_t page_address)
-{
-  auto page_num = champsim::page_number{champsim::address{page_address}};
-  ErrorPageManager::get_instance().add_error_page(page_num);
-  fmt::print("[MEMORY_CONTROLLER] Added error page: 0x{:x} (page_num: 0x{:x})\n", 
-             page_address, page_num.to<uint64_t>());
-}
-
-void MEMORY_CONTROLLER::remove_error_page(uint64_t page_address)
-{
-  auto page_num = champsim::page_number{champsim::address{page_address}};
-  ErrorPageManager::get_instance().remove_error_page(page_num);
-  fmt::print("[MEMORY_CONTROLLER] Removed error page: 0x{:x}\n", page_address);
-}
-
-void MEMORY_CONTROLLER::set_error_latency_cycles(uint64_t cycles)
-{
-  auto latency = cycles * clock_period;
-  ErrorPageManager::get_instance().set_error_latency(latency);
-  fmt::print("[MEMORY_CONTROLLER] Set error latency to {} cycles\n", cycles);
-}
-
-void MEMORY_CONTROLLER::clear_all_error_pages()
-{
-  ErrorPageManager::get_instance().clear_all_error_pages();
-  fmt::print("[MEMORY_CONTROLLER] Cleared all error pages\n");
-}
-
-size_t MEMORY_CONTROLLER::get_error_page_count() const
-{
-  return ErrorPageManager::get_instance().get_error_page_count();
-}
-
-void MEMORY_CONTROLLER::print_error_pages() const
-{
-  ErrorPageManager::get_instance().print_error_pages();
-}

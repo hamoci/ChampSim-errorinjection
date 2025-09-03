@@ -1,5 +1,5 @@
 {
-  "executable_name": "champsim_4kb_ptw-dram-error_proto",
+  "executable_name": "champsim_4kb",
   "block_size": 64,
   "page_size": 4096,
   "heartbeat_frequency": 10000000,
@@ -184,12 +184,5 @@
     "num_levels": 5,
     "minor_fault_penalty": 200,
     "randomization": 1
-  },
-
-  "error_page_manager": {
-    "mode": "RANDOM",
-    "error_latency_penalty": 500,
-    "error_probability": 0.0001,
-    "errors_per_interval": 1
   }
 }

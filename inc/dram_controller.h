@@ -219,13 +219,6 @@ public:
 
   [[nodiscard]] champsim::data::bytes size() const;
 
-  // Hamoci's Error Page Management Functions
-  void add_error_page(uint64_t page_address);
-  void remove_error_page(uint64_t page_address);
-  void set_error_latency_cycles(uint64_t cycles);
-  void clear_all_error_pages();
-  size_t get_error_page_count() const;
-  void print_error_pages() const;
 };
 
 #endif
