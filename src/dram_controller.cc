@@ -425,7 +425,7 @@ void MEMORY_CONTROLLER::initialize()
   // ErrorPageManager::get_instance().set_errors_per_interval(1);
 
   fmt::print("[ERROR_PAGE_MANAGER] Error latency: {} \n",
-             ErrorPageManager::get_instance().get_error_latency());
+             ErrorPageManager::get_instance().get_error_latency().count());
   fmt::print("[ERROR_PAGE_MANAGER] Random seed: 54321 (fixed for preload reproducibility)\n");
   
   if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::ALL_ON) {

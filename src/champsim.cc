@@ -29,7 +29,7 @@
 #include "phase_info.h"
 #include "tracereader.h"
 
-constexpr int DEADLOCK_CYCLE{20000}; //hamoci : Deadlock condition revise
+constexpr int DEADLOCK_CYCLE{1000000000}; //hamoci : Deadlock condition revise
 //constexpr int DEADLOCK_CYCLE{500}; //Original Code
 
 const auto start_time = std::chrono::steady_clock::now();
@@ -107,7 +107,7 @@ phase_stats do_phase(const phase_info& phase, environment& env, std::vector<trac
           double livelock_ipc = std::ceil(cpu.sim_instr() - livelock_instr[cpu.cpu]) / std::ceil(livelock_period);
           if (livelock_ipc <= *thres) {
             if (std::distance(std::begin(livelock_threshold), thres) == 0) {
-              livelock_trigger = true;
+              //livelock_trigger = true; //hamoci: Change to warning only
               fmt::print("{} CPU {} panic: IPC {:.5g} < {:.5g}\n", phase_name, cpu.cpu, livelock_ipc, *thres);
             } else if (std::distance(std::begin(livelock_threshold), thres) == 1)
               fmt::print("{} CPU {} critical: IPC {:.5g} < {:.5g}\n", phase_name, cpu.cpu, livelock_ipc, *thres);
