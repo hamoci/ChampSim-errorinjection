@@ -131,10 +131,11 @@ long DRAM_CHANNEL::operate()
     }
   }
 
-  /* Hamoci : Random Error Injection */
-  if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM) {
-    ErrorPageManager::get_instance().inject_error_at_random();
-  }
+  /* Hamoci : Random Error Injection (Legacy - now replaced by BER-based per-access check) */
+  // Legacy random error injection - no longer needed with BER-based approach
+  // if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM) {
+  //   ErrorPageManager::get_instance().inject_error_at_random();
+  // }
   /* Hamoci : End of Injection */
 
   check_write_collision();
@@ -360,17 +361,17 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
     if (!bank_request[op_idx].valid && !bank_request[op_idx].under_refresh) {
       bool row_buffer_hit = (bank_request[op_idx].open_row.has_value() && *(bank_request[op_idx].open_row) == op_row);
       dram_access_count++;
-      // Hamoci's Error Page Check - Extract page number and check if it's an error page
-      auto page_num = ErrorPageManager::get_page_number(pkt->value().address);
+      // Hamoci's BER-based Error Check - Apply Page Error Rate for each DRAM access
       auto error_latency = champsim::chrono::clock::duration{};
-      if (ErrorPageManager::get_instance().is_error_page(page_num)) {
+      if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM && 
+          ErrorPageManager::get_instance().check_page_error()) {
         error_latency = ErrorPageManager::get_instance().get_error_latency();
-        ErrorPageManager::get_instance().remove_error_page(page_num);
         // Record error statistics
         ErrorPageManager::get_instance().record_error_access();
         //for debug
-        //fmt::print("[DRAM_ERROR_PAGE] Error page access detected! address={} page_num=0x{:x} additional_latency={} CPU cycles, dram access ={}\n", 
-                  //  pkt->value().address, page_num.to<uint64_t>(), ErrorPageManager::get_instance().get_error_latency_cycles(), dram_access_count);
+        //fmt::print("[DRAM_BER_ERROR] Page error occurred! address={} page_error_rate={:.2e} additional_latency={} cycles, dram access ={}\n", 
+        //           pkt->value().address, ErrorPageManager::get_instance().get_page_error_rate(), 
+        //           error_latency.count(), dram_access_count);
       }
 
       // this bank is now busy
@@ -418,11 +419,7 @@ void MEMORY_CONTROLLER::initialize()
              1us / (data_bus_period));
 
   // Hamoci's Error Page Manager initialization
-  // Set default error latency (e.g., 500 cycles for memory error correction)
-  // ErrorPageManager::get_instance().set_error_latency(500 * clock_period);
-  // ErrorPageManager::get_instance().set_mode(ErrorPageManagerMode::RANDOM);
-  // ErrorPageManager::get_instance().set_base_error_probability(0.01 / 100.0);
-  // ErrorPageManager::get_instance().set_errors_per_interval(1);
+  // Example initialization with BER-based error modeling
 
   fmt::print("[ERROR_PAGE_MANAGER] Error latency: {} \n",
              ErrorPageManager::get_instance().get_error_latency().count());
@@ -436,11 +433,21 @@ void MEMORY_CONTROLLER::initialize()
              ErrorPageManager::get_instance().get_error_page_count());
   }
   else if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM) {
-    fmt::print("[ERROR_PAGE_MANAGER] Error pages random\n");
-    fmt::print("[ERROR_PAGE_MANAGER] Error Probability: {}%\n", 
-      ErrorPageManager::get_instance().get_base_error_probability() * 100);
-    fmt::print("[ERROR_PAGE_MANAGER] Error Pages per Interval: {}\n",
-      ErrorPageManager::get_instance().get_errors_per_interval());
+    fmt::print("[ERROR_PAGE_MANAGER] BER-based error modeling enabled\n");
+    // Initialize page error rate from configured bit error rate
+    double ber = ErrorPageManager::get_instance().get_bit_error_rate();
+    if (ber > 0.0) {
+      ErrorPageManager::get_instance().init_page_error_rate(ber);
+    } else {
+      // Fallback to default DRAM BER if not configured
+      ErrorPageManager::get_instance().init_page_error_rate(1e-12);
+    }
+    fmt::print("[ERROR_PAGE_MANAGER] Bit Error Rate: {:.2e}\n", 
+      ErrorPageManager::get_instance().get_bit_error_rate());
+    fmt::print("[ERROR_PAGE_MANAGER] Page Error Rate: {:.2e}\n",
+      ErrorPageManager::get_instance().get_page_error_rate());
+    fmt::print("[ERROR_PAGE_MANAGER] Page Size: {} bits\n",
+      ErrorPageManager::get_instance().get_page_size_bits());
   } else {
     fmt::print("[ERROR_PAGE_MANAGER] Error pages off\n");
   }

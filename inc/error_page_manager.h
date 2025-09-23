@@ -32,8 +32,15 @@ private:
 private:
     std::mt19937 gen{54321};
     std::uniform_real_distribution<double> prob_dist{0.0, 1.0};
-    double base_error_probability{0.001};
+    //double base_error_probability{0.001};
     uint32_t errors_per_interval{1};
+    
+// Monte Carlo Simulation Results
+private:
+    double bit_error_rate{0.0};
+    double page_error_rate{0.0};
+    uint64_t page_size_bits{0};
+    
 
 // Error Statistics
 private:
@@ -59,16 +66,27 @@ public:
     void remove_error_page(champsim::page_number page) { error_pages.erase(page.to<uint64_t>()); }
     bool is_error_page(champsim::page_number page) const { return error_pages.find(page.to<uint64_t>()) != error_pages.end(); }
 
+    // Monte Carlo Simulation for page error rate
+    void init_page_error_rate(double bit_error_rate);
 
     // Latency management
     void set_error_latency(champsim::chrono::clock::duration latency) { error_latency_penalty = latency; }
     champsim::chrono::clock::duration get_error_latency() const { return error_latency_penalty; }
 
     // Random error injection settings
-    void set_base_error_probability(double prob) { base_error_probability = prob; }
+    //void set_base_error_probability(double prob) { base_error_probability = prob; }
     void set_errors_per_interval(uint32_t count) { errors_per_interval = count; }
-    double get_base_error_probability() const { return base_error_probability; }
+    //double get_base_error_probability() const { return base_error_probability; }
     uint32_t get_errors_per_interval() const { return errors_per_interval; }
+    
+    // Monte Carlo simulation results
+    void set_bit_error_rate(double ber) { bit_error_rate = ber; }
+    double get_bit_error_rate() const { return bit_error_rate; }
+    double get_page_error_rate() const { return page_error_rate; }
+    uint64_t get_page_size_bits() const { return page_size_bits; }
+    
+    // Check if error occurs for current DRAM access based on Page Error Rate
+    bool check_page_error() { return prob_dist(gen) < page_error_rate; }
 
     // Extract page number from physical address
     static champsim::page_number get_page_number(champsim::address addr) {
@@ -89,7 +107,7 @@ public:
     // Inject Error at All Pages
     void all_error_pages_on(uint64_t page_num);
     // Inject Random Error 
-    void inject_error_at_random(void);
+    // void inject_error_at_random(void);
     
     // Error Statistics
     void record_error_access(void) {

@@ -95,6 +95,6 @@ def error_page_manager_defaults():
     return {
         'mode': 'OFF',
         'error_latency_penalty': 0,
-        'error_probability': 0.0,
+        'bit_error_rate': 0.0,
         'errors_per_interval': 1
     }
