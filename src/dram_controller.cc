@@ -131,12 +131,12 @@ long DRAM_CHANNEL::operate()
     }
   }
 
-  /* Hamoci : Random Error Injection (Legacy - now replaced by BER-based per-access check) */
-  // Legacy random error injection - no longer needed with BER-based approach
-  // if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM) {
-  //   ErrorPageManager::get_instance().inject_error_at_random();
-  // }
-  /* Hamoci : End of Injection */
+  /* Hamoci : Cycle-based Error Tracking */
+  // Update cycle error counter every cycle (only in non-warmup and CYCLE mode)
+  if (!warmup && ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE) {
+    ErrorPageManager::get_instance().update_cycle_errors(current_time);
+  }
+  /* Hamoci : End of Error Tracking */
 
   check_write_collision();
   check_read_collision();
@@ -361,17 +361,27 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
     if (!bank_request[op_idx].valid && !bank_request[op_idx].under_refresh) {
       bool row_buffer_hit = (bank_request[op_idx].open_row.has_value() && *(bank_request[op_idx].open_row) == op_row);
       dram_access_count++;
-      // Hamoci's BER-based Error Check - Apply Page Error Rate for each DRAM access
+      // Hamoci's Error Check - Apply error latency based on mode
       auto error_latency = champsim::chrono::clock::duration{};
-      if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM && 
+
+      // RANDOM mode: BER-based error check
+      if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM &&
           ErrorPageManager::get_instance().check_page_error()) {
         error_latency = ErrorPageManager::get_instance().get_error_latency();
-        // Record error statistics
         ErrorPageManager::get_instance().record_error_access();
         //for debug
-        //fmt::print("[DRAM_BER_ERROR] Page error occurred! address={} page_error_rate={:.2e} additional_latency={} cycles, dram access ={}\n", 
-        //           pkt->value().address, ErrorPageManager::get_instance().get_page_error_rate(), 
+        //fmt::print("[DRAM_BER_ERROR] Page error occurred! address={} page_error_rate={:.2e} additional_latency={} cycles, dram access ={}\n",
+        //           pkt->value().address, ErrorPageManager::get_instance().get_page_error_rate(),
         //           error_latency.count(), dram_access_count);
+      }
+      // CYCLE mode: Consume error from counter
+      else if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE &&
+               ErrorPageManager::get_instance().consume_cycle_error()) {
+        error_latency = ErrorPageManager::get_instance().get_error_latency();
+        ErrorPageManager::get_instance().record_error_access();
+        // Debug output
+        fmt::print("[DRAM_CYCLE_ERROR] Cycle-based error applied! address=0x{:x} additional_latency={} cycles\n",
+                   pkt->value().address.to<uint64_t>(), error_latency.count());
       }
 
       // this bank is now busy
@@ -448,6 +458,12 @@ void MEMORY_CONTROLLER::initialize()
       ErrorPageManager::get_instance().get_page_error_rate());
     fmt::print("[ERROR_PAGE_MANAGER] Page Size: {} bits\n",
       ErrorPageManager::get_instance().get_page_size_bits());
+  } else if(ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE) {
+    fmt::print("[ERROR_PAGE_MANAGER] Cycle-based error modeling enabled\n");
+    fmt::print("[ERROR_PAGE_MANAGER] Errors per interval: {}\n",
+      ErrorPageManager::get_instance().get_errors_per_interval());
+    fmt::print("[ERROR_PAGE_MANAGER] Error cycle interval: {} cycles\n",
+      ErrorPageManager::get_instance().get_error_cycle_interval());
   } else {
     fmt::print("[ERROR_PAGE_MANAGER] Error pages off\n");
   }
@@ -484,6 +500,19 @@ void MEMORY_CONTROLLER::end_phase(unsigned cpu)
   // Print Error Page Statistics
   auto& error_manager = ErrorPageManager::get_instance();
   fmt::print("\n=== ERROR PAGE STATISTICS ===\n");
+  fmt::print("Mode: ");
+  if (error_manager.get_mode() == ErrorPageManagerMode::CYCLE) {
+    fmt::print("CYCLE\n");
+    fmt::print("Error Cycle Interval: {} CPU cycles\n", error_manager.get_error_cycle_interval());
+  } else if (error_manager.get_mode() == ErrorPageManagerMode::RANDOM) {
+    fmt::print("RANDOM (BER-based)\n");
+    fmt::print("Bit Error Rate: {:.2e}\n", error_manager.get_bit_error_rate());
+    fmt::print("Page Error Rate: {:.2e}\n", error_manager.get_page_error_rate());
+  } else if (error_manager.get_mode() == ErrorPageManagerMode::ALL_ON) {
+    fmt::print("ALL_ON\n");
+  } else {
+    fmt::print("OFF\n");
+  }
   fmt::print("Total Error Accesses: {}\n", error_manager.get_total_error_count());
   fmt::print("==============================\n");
 }

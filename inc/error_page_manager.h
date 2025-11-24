@@ -16,6 +16,7 @@
 enum class ErrorPageManagerMode {
     ALL_ON,
     RANDOM,
+    CYCLE,
     OFF,
 };
 
@@ -40,6 +41,13 @@ private:
     double bit_error_rate{0.0};
     double page_error_rate{0.0};
     uint64_t page_size_bits{0};
+
+// Cycle-based Error Injection
+private:
+    uint64_t error_cycle_interval{0};
+    champsim::chrono::picoseconds cpu_clock_period{};
+    uint64_t last_error_cycle{0};  // Track the last cycle when error was triggered
+    uint64_t pending_error_count{0};  // Counter for pending errors
     
 
 // Error Statistics
@@ -87,6 +95,42 @@ public:
     
     // Check if error occurs for current DRAM access based on Page Error Rate
     bool check_page_error() { return prob_dist(gen) < page_error_rate; }
+
+    // Cycle-based error injection setters/getters
+    void set_error_cycle_interval(uint64_t interval) { error_cycle_interval = interval; }
+    uint64_t get_error_cycle_interval() const { return error_cycle_interval; }
+    void set_cpu_clock_period(champsim::chrono::picoseconds period) { cpu_clock_period = period; }
+    champsim::chrono::picoseconds get_cpu_clock_period() const { return cpu_clock_period; }
+
+    // Update cycle error counter (called from operate() every cycle)
+    void update_cycle_errors(champsim::chrono::clock::time_point current_time) {
+        if (error_cycle_interval == 0 || cpu_clock_period.count() == 0) {
+            return;
+        }
+
+        uint64_t current_cycle = current_time.time_since_epoch().count() / cpu_clock_period.count();
+        uint64_t current_interval_num = current_cycle / error_cycle_interval;
+        uint64_t last_interval_num = last_error_cycle / error_cycle_interval;
+
+        // If we crossed an interval boundary, add an error to the counter
+        if (current_interval_num > last_interval_num) {
+            last_error_cycle = current_cycle;
+            pending_error_count++;
+
+            // Debug output
+            fmt::print("[ERROR_CYCLE] Error added at CPU cycle {}, interval {}, pending count: {}\n",
+                       current_cycle, current_interval_num, pending_error_count);
+        }
+    }
+
+    // Consume one error from the counter (called from service_packet)
+    bool consume_cycle_error() {
+        if (pending_error_count > 0) {
+            pending_error_count--;
+            return true;
+        }
+        return false;
+    }
 
     // Extract page number from physical address
     static champsim::page_number get_page_number(champsim::address addr) {

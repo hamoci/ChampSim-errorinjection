@@ -96,5 +96,6 @@ def error_page_manager_defaults():
         'mode': 'OFF',
         'error_latency_penalty': 0,
         'bit_error_rate': 0.0,
-        'errors_per_interval': 1
+        'errors_per_interval': 1,
+        'error_cycle_interval': 0
     }

@@ -164,7 +164,7 @@ struct DRAM_CHANNEL final : public champsim::operable {
 
   DRAM_CHANNEL(champsim::chrono::picoseconds dbus_period, champsim::chrono::picoseconds mc_period, std::size_t t_rp, std::size_t t_rcd, std::size_t t_cas,
                std::size_t t_ras, champsim::chrono::microseconds refresh_period, std::size_t refreshes_per_period, champsim::data::bytes width,
-               std::size_t rq_size, std::size_t wq_size, DRAM_ADDRESS_MAPPING addr_mapping);
+               std::size_t rq_size, std::size_t wq_size, DRAM_ADDRESS_MAPPING addr_mapper);
 
   void check_write_collision();
   void check_read_collision();

@@ -399,17 +399,26 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         yield '  epm.set_mode(ErrorPageManagerMode::ALL_ON);'
     elif error_page_manager.get('mode') == 'RANDOM':
         yield '  epm.set_mode(ErrorPageManagerMode::RANDOM);'
+    elif error_page_manager.get('mode') == 'CYCLE':
+        yield '  epm.set_mode(ErrorPageManagerMode::CYCLE);'
     else:
         yield '  epm.set_mode(ErrorPageManagerMode::OFF);'
-    
+
     if 'error_latency_penalty' in error_page_manager:
         yield f'  epm.set_error_latency(champsim::chrono::picoseconds{{{error_page_manager["error_latency_penalty"] * global_clock_period}}});'
-    
+
     if 'bit_error_rate' in error_page_manager:
         yield f'  epm.set_bit_error_rate({error_page_manager["bit_error_rate"]});'
-        
+
     if 'errors_per_interval' in error_page_manager:
         yield f'  epm.set_errors_per_interval({error_page_manager["errors_per_interval"]});'
+
+    # CYCLE mode specific configuration
+    if 'error_cycle_interval' in error_page_manager:
+        yield f'  epm.set_error_cycle_interval({error_page_manager["error_cycle_interval"]});'
+
+    # Set CPU clock period for CYCLE mode
+    yield f'  epm.set_cpu_clock_period(champsim::chrono::picoseconds{{{global_clock_period}}});'
     yield '}'
     yield ''
 
