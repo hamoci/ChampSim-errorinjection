@@ -33,6 +33,7 @@ private:
 private:
     std::mt19937 gen{54321};
     std::uniform_real_distribution<double> prob_dist{0.0, 1.0};
+    std::exponential_distribution<double> exp_dist{1.0};  // For exponential interval
     //double base_error_probability{0.001};
     uint32_t errors_per_interval{1};
     
@@ -97,7 +98,15 @@ public:
     bool check_page_error() { return prob_dist(gen) < page_error_rate; }
 
     // Cycle-based error injection setters/getters
-    void set_error_cycle_interval(uint64_t interval) { error_cycle_interval = interval; }
+    void set_error_cycle_interval(uint64_t interval) {
+        error_cycle_interval = interval;
+        // Initialize exponential distribution with rate = 1/mean_interval
+        if (interval > 0) {
+            exp_dist = std::exponential_distribution<double>(1.0 / static_cast<double>(interval));
+            // Initialize first error cycle with exponential sample
+            last_error_cycle = static_cast<uint64_t>(exp_dist(gen));
+        }
+    }
     uint64_t get_error_cycle_interval() const { return error_cycle_interval; }
     void set_cpu_clock_period(champsim::chrono::picoseconds period) { cpu_clock_period = period; }
     champsim::chrono::picoseconds get_cpu_clock_period() const { return cpu_clock_period; }
@@ -109,17 +118,19 @@ public:
         }
 
         uint64_t current_cycle = current_time.time_since_epoch().count() / cpu_clock_period.count();
-        uint64_t current_interval_num = current_cycle / error_cycle_interval;
-        uint64_t last_interval_num = last_error_cycle / error_cycle_interval;
 
-        // If we crossed an interval boundary, add an error to the counter
-        if (current_interval_num > last_interval_num) {
-            last_error_cycle = current_cycle;
+        // last_error_cycle is now used as "next_error_cycle"
+        // If current cycle reaches the next scheduled error cycle, trigger error
+        if (current_cycle >= last_error_cycle) {
             pending_error_count++;
 
+            // Sample next interval from exponential distribution
+            double next_interval = exp_dist(gen);
+            last_error_cycle = current_cycle + static_cast<uint64_t>(next_interval);
+
             // Debug output
-            fmt::print("[ERROR_CYCLE] Error added at CPU cycle {}, interval {}, pending count: {}\n",
-                       current_cycle, current_interval_num, pending_error_count);
+            fmt::print("[ERROR_CYCLE] Error added at CPU cycle {}, next at {}, pending count: {}\n",
+                       current_cycle, last_error_cycle, pending_error_count);
         }
     }
 
