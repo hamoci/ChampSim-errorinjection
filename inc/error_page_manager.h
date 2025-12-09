@@ -128,9 +128,9 @@ public:
             double next_interval = exp_dist(gen);
             last_error_cycle = current_cycle + static_cast<uint64_t>(next_interval);
 
-            // Debug output
-            fmt::print("[ERROR_CYCLE] Error added at CPU cycle {}, next at {}, pending count: {}\n",
-                       current_cycle, last_error_cycle, pending_error_count);
+            // Debug output - commented out to show accumulated errors in heartbeat instead
+            // fmt::print("[ERROR_CYCLE] Error added at CPU cycle {}, next at {}, pending count: {}\n",
+            //            current_cycle, last_error_cycle, pending_error_count);
         }
     }
 

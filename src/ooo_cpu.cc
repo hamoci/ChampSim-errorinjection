@@ -29,6 +29,7 @@
 #include "deadlock.h"
 #include "instruction.h"
 #include "util/span.h"
+#include "error_page_manager.h"
 
 std::chrono::seconds elapsed_time();
 
@@ -61,11 +62,16 @@ long O3_CPU::operate()
     auto phase_instr{std::ceil(num_retired - begin_phase_instr)};
     auto phase_cycle{double_duration{current_time - begin_phase_time} / clock_period};
 
-    fmt::print("Heartbeat CPU {} instructions: {} cycles: {} heartbeat IPC: {:.4g} cumulative IPC: {:.4g} (Simulation time: {:%H hr %M min %S sec})\n", cpu,
-               num_retired, current_time.time_since_epoch() / clock_period, heartbeat_instr / heartbeat_cycle, phase_instr / phase_cycle, elapsed_time());
+    // Get current error count and calculate errors since last heartbeat
+    auto current_errors = ErrorPageManager::get_instance().get_total_error_count();
+    auto heartbeat_errors = current_errors - last_heartbeat_errors;
+
+    fmt::print("Heartbeat CPU {} instructions: {} cycles: {} heartbeat IPC: {:.4g} cumulative IPC: {:.4g} errors: {} (total: {}) (Simulation time: {:%H hr %M min %S sec})\n", cpu,
+               num_retired, current_time.time_since_epoch() / clock_period, heartbeat_instr / heartbeat_cycle, phase_instr / phase_cycle, heartbeat_errors, current_errors, elapsed_time());
 
     last_heartbeat_instr = num_retired;
     last_heartbeat_time = current_time;
+    last_heartbeat_errors = current_errors;
   }
 
   return progress;

@@ -8,47 +8,39 @@ mkdir -p results
 
 # 바이너리 파일 목록
 binaries=(
-    "champsim_4kb_32gb"
-    # "champsim_4kb_64gb"
-    # "champsim_4kb_128gb"
-    # "champsim_4kb_error_32gb_1e-2"
-    # "champsim_4kb_error_32gb_1e-3"
-    # "champsim_4kb_error_32gb_1e-4"
-    # "champsim_4kb_error_32gb_1e-5"
-    # "champsim_4kb_error_32gb_1e-6"
-    # "champsim_4kb_error_64gb_1e-2"
-    # "champsim_4kb_error_64gb_1e-3"
-    # "champsim_4kb_error_64gb_1e-4"
-    # "champsim_4kb_error_64gb_1e-5"
-    # "champsim_4kb_error_64gb_1e-6"
-    # "champsim_4kb_error_128gb_1e-2"
-    # "champsim_4kb_error_128gb_1e-3"
-    # "champsim_4kb_error_128gb_1e-4"
-    # "champsim_4kb_error_128gb_1e-5"
-    # "champsim_4kb_error_128gb_1e-6"
+    # "champsim_4kb_error_32gb_1e-7"
+    # "champsim_4kb_error_32gb_1e-8"
+    "champsim_4kb_error_32gb_1e-9"
+    # "champsim_4kb_error_64gb_1e-7"
+    # "champsim_4kb_error_64gb_1e-8"
+    "champsim_4kb_error_64gb_1e-9"
+    # "champsim_4kb_error_128gb_1e-7"
+    # "champsim_4kb_error_128gb_1e-8"
+    "champsim_4kb_error_128gb_1e-9"
 
-    # "champsim_2mb_32gb"
-    # "champsim_2mb_64gb"
-    # "champsim_2mb_128gb"
-    # "champsim_2mb_error_32gb_1e-2"
-    # "champsim_2mb_error_32gb_1e-3"
-    # "champsim_2mb_error_32gb_1e-4"
-    # "champsim_2mb_error_32gb_1e-5"
-    # "champsim_2mb_error_32gb_1e-6"
-    # "champsim_2mb_error_64gb_1e-2"
-    # "champsim_2mb_error_64gb_1e-3"
-    # "champsim_2mb_error_64gb_1e-4"
-    # "champsim_2mb_error_64gb_1e-5"
-    # "champsim_2mb_error_64gb_1e-6"
-    # "champsim_2mb_error_128gb_1e-2"
-    # "champsim_2mb_error_128gb_1e-3"
-    # "champsim_2mb_error_128gb_1e-4"
-    # "champsim_2mb_error_128gb_1e-5"
-    # "champsim_2mb_error_128gb_1e-6"
+    # "champsim_2mb_error_32gb_1e-7"
+    # "champsim_2mb_error_32gb_1e-8"
+    "champsim_2mb_error_32gb_1e-9"
+    # "champsim_2mb_error_64gb_1e-7"
+    # "champsim_2mb_error_64gb_1e-8"
+    "champsim_2mb_error_64gb_1e-9"
+    # "champsim_2mb_error_128gb_1e-7"
+    # "champsim_2mb_error_128gb_1e-8"
+    "champsim_2mb_error_128gb_1e-9"
 )
 
 # 트레이스 파일 목록 (test_traces 폴더 기준)
 traces=(
+    # "602.gcc_s-1850B.champsimtrace.xz"
+    # "603.bwaves_s-2931B.champsimtrace.xz"
+    # "605.mcf_s-994B.champsimtrace.xz"
+    # "607.cactuBSSN_s-2421B.champsimtrace.xz"
+    # "620.omnetpp_s-141B.champsimtrace.xz"
+    # "621.wrf_s-6673B.champsimtrace.xz"
+    # "623.xalancbmk_s-592B.champsimtrace.xz"
+    # "628.pop2_s-17B.champsimtrace.xz"
+    # "649.fotonik3d_s-10881B.champsimtrace.xz"
+    # "654.roms_s-1007B.champsimtrace.xz"
     # "bc-3.trace.gz"
     # "bc-5.trace.gz"
     # "bc-12.trace.gz"
@@ -68,21 +60,25 @@ traces=(
     # "sssp-5.trace.gz"
     # "sssp-10.trace.gz"
     # "sssp-14.trace.gz"
-    # "602.gcc_s-1850B.champsimtrace.xz"
-    # "603.bwaves_s-2931B.champsimtrace.xz"
-    # "605.mcf_s-994B.champsimtrace.xz"
-    # "607.cactuBSSN_s-2421B.champsimtrace.xz"
-    # "620.omnetpp_s-141B.champsimtrace.xz"
-    # "621.wrf_s-6673B.champsimtrace.xz"
-    # "623.xalancbmk_s-592B.champsimtrace.xz"
-    # "628.pop2_s-17B.champsimtrace.xz"
-    # "649.fotonik3d_s-10881B.champsimtrace.xz"
-    # "654.roms_s-1007B.champsimtrace.xz"
-    "redis-5kw-rs1-t11.champsimtrace.xz"
+    "benchbase-tpcc.champsim.trace.gz"
+    "benchbase-twitter.champsim.trace.gz"
+    "benchbase-wikipedia.champsim.trace.gz"
+    "charlie.1006518.champsim.trace.gz"
+    "dacapo-kafka.champsim.trace.gz"
+    "dacapo-spring.champsim.trace.gz"
+    "dacapo-tomcat.champsim.trace.gz"
+    "delta.507252.champsim.trace.gz"
+    "merced.467915.champsim.trace.gz"
+    "mwnginxfpm-wiki.champsim.trace.gz"
+    "nodeapp-nodeapp.champsim.trace.gz"
+    "nodeapp-nodeapp-small.champsim.trace.gz"
+    "renaissance-finagle-chirper.champsim.trace.gz"
+    "renaissance-finagle-http.champsim.trace.gz"
+    "whiskey.426708.champsim.trace.gz"
 )
 
 # 최대 병렬 프로세스 수
-MAX_PARALLEL=40
+MAX_PARALLEL=42
 
 # 현재 실행 중인 작업 수를 추적하기 위한 변수
 running_jobs=0
@@ -116,7 +112,7 @@ for binary in "${binaries[@]}"; do
         echo "실행 중: bin/$binary test_traces/$trace -> $output_file"
         
         # 백그라운드에서 시뮬레이션 실행
-        nohup bin/$binary test_traces/$trace > "$output_file" 2>&1 &
+        nohup bin/$binary /home/hamoci/Study/ChampSim/test_traces/$trace > "$output_file" 2>&1 &
 
         # 실행 중인 작업 수 증가
         ((running_jobs++))

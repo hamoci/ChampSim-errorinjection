@@ -379,9 +379,9 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
                ErrorPageManager::get_instance().consume_cycle_error()) {
         error_latency = ErrorPageManager::get_instance().get_error_latency();
         ErrorPageManager::get_instance().record_error_access();
-        // Debug output
-        fmt::print("[DRAM_CYCLE_ERROR] Cycle-based error applied! address=0x{:x} additional_latency={} cycles\n",
-                   pkt->value().address.to<uint64_t>(), error_latency.count());
+        // Debug output - commented out to show accumulated errors in heartbeat instead
+        //fmt::print("[DRAM_CYCLE_ERROR] Cycle-based error applied! address=0x{:x} additional_latency={} cycles\n",
+        //           pkt->value().address.to<uint64_t>(), error_latency.count());
       }
 
       // this bank is now busy
