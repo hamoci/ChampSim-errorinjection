@@ -1,5 +1,5 @@
 {
-  "executable_name": "champsim_4kb_error_1e-14",
+  "executable_name": "champsim_4kb_error_cycle",
   "block_size": 64,
   "page_size": 4096,
   "heartbeat_frequency": 10000000,
@@ -187,10 +187,10 @@
   },
 
   "error_page_manager": {
-    "mode": "RANDOM",
+    "mode": "CYCLE",
     "error_latency_penalty": 694,
-    "bit_error_rate": 1e-14,
+    "bit_error_rate": 0,
     "errors_per_interval": 1,
-    "error_cycle_interval": 0
+    "error_cycle_interval": 10000
   }
 }

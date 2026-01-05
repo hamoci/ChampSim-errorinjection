@@ -49,7 +49,8 @@ private:
     champsim::chrono::picoseconds cpu_clock_period{};
     uint64_t last_error_cycle{0};  // Track the last cycle when error was triggered
     uint64_t pending_error_count{0};  // Counter for pending errors
-    
+    int debug{0};  // Debug flag: 1 to enable [ERROR_CYCLE] logs, 0 to disable
+
 
 // Error Statistics
 private:
@@ -111,6 +112,10 @@ public:
     void set_cpu_clock_period(champsim::chrono::picoseconds period) { cpu_clock_period = period; }
     champsim::chrono::picoseconds get_cpu_clock_period() const { return cpu_clock_period; }
 
+    // Debug mode setter/getter
+    void set_debug(int debug_mode) { debug = debug_mode; }
+    int get_debug() const { return debug; }
+
     // Update cycle error counter (called from operate() every cycle)
     void update_cycle_errors(champsim::chrono::clock::time_point current_time) {
         if (error_cycle_interval == 0 || cpu_clock_period.count() == 0) {
@@ -128,9 +133,11 @@ public:
             double next_interval = exp_dist(gen);
             last_error_cycle = current_cycle + static_cast<uint64_t>(next_interval);
 
-            // Debug output - commented out to show accumulated errors in heartbeat instead
-            // fmt::print("[ERROR_CYCLE] Error added at CPU cycle {}, next at {}, pending count: {}\n",
-            //            current_cycle, last_error_cycle, pending_error_count);
+            // Debug output - only show when debug=1
+            if (debug == 1) {
+                fmt::print("[ERROR_CYCLE] Error added at CPU cycle {}, next at {}, pending count: {}\n",
+                           current_cycle, last_error_cycle, pending_error_count);
+            }
         }
     }
 

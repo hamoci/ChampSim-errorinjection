@@ -1,7 +1,7 @@
 {
-  "executable_name": "champsim_4kb_error_1e-14",
+  "executable_name": "champsim_2mb_64gb",
   "block_size": 64,
-  "page_size": 4096,
+  "page_size": 2097152,
   "heartbeat_frequency": 10000000,
   "num_cores": 1,
 
@@ -166,9 +166,9 @@
     "ranks": 1,
     "bankgroups": 8,
     "banks": 4,
-    "bank_rows": 65536,
-    "bank_columns": 1024,
-    "channel_width": 8,
+    "bank_rows": 131072,
+    "bank_columns": 2048,
+    "channel_width": 4,
     "wq_size": 64,
     "rq_size": 64,
     "tCAS": 16.6,
@@ -181,16 +181,12 @@
 
   "virtual_memory": {
     "pte_page_size": 4096,
-    "num_levels": 5,
-    "minor_fault_penalty": 200,
+    "num_levels": 4,
+    "minor_fault_penalty": 4239,
     "randomization": 1
   },
 
   "error_page_manager": {
-    "mode": "RANDOM",
-    "error_latency_penalty": 694,
-    "bit_error_rate": 1e-14,
-    "errors_per_interval": 1,
-    "error_cycle_interval": 0
+    "mode": "OFF"
   }
 }

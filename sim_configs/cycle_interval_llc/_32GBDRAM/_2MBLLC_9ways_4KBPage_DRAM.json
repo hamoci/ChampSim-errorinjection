@@ -1,5 +1,5 @@
 {
-  "executable_name": "champsim_4kb_error_1e-14",
+  "executable_name": "champsim_2mb_9ways_4kb_32gb",
   "block_size": 64,
   "page_size": 4096,
   "heartbeat_frequency": 10000000,
@@ -145,7 +145,7 @@
   "LLC": {
     "frequency": 4000,
     "sets": 2048,
-    "ways": 16,
+    "ways": 9,
     "rq_size": 32,
     "wq_size": 32,
     "pq_size": 32,
@@ -167,8 +167,8 @@
     "bankgroups": 8,
     "banks": 4,
     "bank_rows": 65536,
-    "bank_columns": 1024,
-    "channel_width": 8,
+    "bank_columns": 2048,
+    "channel_width": 4,
     "wq_size": 64,
     "rq_size": 64,
     "tCAS": 16.6,
@@ -187,10 +187,6 @@
   },
 
   "error_page_manager": {
-    "mode": "RANDOM",
-    "error_latency_penalty": 694,
-    "bit_error_rate": 1e-14,
-    "errors_per_interval": 1,
-    "error_cycle_interval": 0
+    "mode": "OFF"
   }
 }

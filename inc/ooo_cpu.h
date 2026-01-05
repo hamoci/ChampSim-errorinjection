@@ -92,7 +92,6 @@ public:
   long long finish_phase_instr = 0;
   champsim::chrono::clock::time_point last_heartbeat_time{};
   long long last_heartbeat_instr = 0;
-  long long last_heartbeat_errors = 0;  // Track errors at last heartbeat
 
   // instruction
   long long num_retired = 0;
