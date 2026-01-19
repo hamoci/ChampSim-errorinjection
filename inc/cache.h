@@ -325,6 +325,59 @@ public:
   {
   }
 
+  /* Hamoci Impl Start */
+public:
+  long error_way_count = 0;
+  static constexpr long MAX_ERROR_WAY = 8;
+
+  // Error Way LRU tracking
+  std::vector<uint64_t> error_way_last_used_cycles;
+  uint64_t error_way_cycle = 0;
+
+  long get_normal_way_end() const {
+    return NUM_WAY - error_way_count;
+  }
+
+  long get_error_way_start() const {
+    return error_way_count > 0 ? (NUM_WAY - error_way_count) : -1;
+  }
+
+  long get_error_way_end() const{
+    return error_way_count > 0 ? NUM_WAY : -1;
+  }
+
+  bool can_expand_error_way() const{
+    return error_way_count < MAX_ERROR_WAY;
+  }
+
+  bool is_error_data(champsim::address addr) const;
+
+private:
+  // 모든 Set의 특정 Way를 Error로 전환
+  bool allocate_error_way(long way_idx);
+  
+  // 특정 Set의 특정 Way 데이터 evict
+  bool evict_way_data(long set_idx, long way_idx);
+  
+  // Error Way 찾기
+  std::pair<set_type::iterator, long> find_error_way(long set_idx,
+                                                    set_type::iterator set_begin, set_type::iterator set_end);
+
+  // Normal Way 찾기
+  std::pair<set_type::iterator, long> find_normal_way(const mshr_type& fill_mshr, long set_idx,
+                                                    set_type::iterator set_begin);
+
+  //Error Way 내 Victim 찾기
+  long find_error_victim(long set_idx,
+                         set_type::iterator set_begin,
+                         set_type::iterator error_begin,
+                         set_type::iterator error_end);
+
+  //Set Index로 span 가져오기 (?)
+  std::pair<set_type::iterator, set_type::iterator> get_set_span_by_index(long set_idx);
+
+/* Hamoci Impl End*/
+
   CACHE(const CACHE&) = delete;
   CACHE(CACHE&&);
   CACHE& operator=(const CACHE&) = delete;

@@ -31,6 +31,7 @@
 #include "util/algorithm.h"
 #include "util/bits.h"
 #include "util/span.h"
+#include "error_page_manager.h"  // Hamoci: Error Page Manager
 
 CACHE::CACHE(CACHE&& other)
     : operable(other),
@@ -172,15 +173,34 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
 
   // find victim
   auto [set_begin, set_end] = get_set_span(fill_mshr.address);
-  auto way = std::find_if_not(set_begin, set_end, [](auto x) { return x.valid; });
-  if (way == set_end) {
-    way = std::next(set_begin, impl_find_victim(fill_mshr.cpu, fill_mshr.instr_id, get_set_index(fill_mshr.address), &*set_begin, fill_mshr.ip,
-                                                fill_mshr.address, fill_mshr.type));
+  long set_idx = get_set_index(fill_mshr.address);
+
+  /* ========================================
+   * Hamoci Start
+   * ======================================== */
+  set_type::iterator way;
+  long way_idx;
+
+  if (is_error_data(fill_mshr.address) && NAME == "LLC") {
+    // Error 데이터 → LLC에서만 Error Way 사용
+    auto [error_way, error_way_idx] = find_error_way(set_idx, set_begin, set_end);
+
+    // Debug output - show when find_error_way is called
+    fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, Set: {}, Way: {}\n",
+               fill_mshr.address.to<uint64_t>(), set_idx, error_way_idx);
+
+    way = error_way;
+    way_idx = error_way_idx;
+  } else {
+    auto [normal_way, normal_way_idx] = find_normal_way(fill_mshr, set_idx, set_begin);
+    way = normal_way;
+    way_idx = normal_way_idx;
   }
+  /* ======================================== Hamoci End ======================================== */
+
   assert(set_begin <= way);
   assert(way <= set_end);
   assert(way != set_end || fill_mshr.type != access_type::WRITE); // Writes may not bypass
-  const auto way_idx = std::distance(set_begin, way);             // cast protected by earlier assertion
 
   if constexpr (champsim::debug_print) {
     fmt::print("[{}] {} instr_id: {} address: {} v_address: {} set: {} way: {} type: {} prefetch_metadata: {} cycle_enqueued: {} cycle: {}\n", NAME, __func__,
@@ -221,6 +241,19 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
                                                   (fill_mshr.type == access_type::PREFETCH), evicting_address, fill_mshr.data_promise->pf_metadata);
   impl_replacement_cache_fill(fill_mshr.cpu, get_set_index(fill_mshr.address), way_idx, module_address(fill_mshr), fill_mshr.ip, evicting_address,
                               fill_mshr.type);
+
+  /* ========================================
+   * Hamoci Start
+   * ======================================== */
+  if (NAME == "LLC" && is_error_data(fill_mshr.address) && way_idx >= get_error_way_start() && way_idx < NUM_WAY) {
+    // Error Way에 데이터를 채웠으므로 타임스탬프 업데이트
+    long error_way_offset = way_idx - get_error_way_start();
+    std::size_t idx = static_cast<std::size_t>(set_idx * MAX_ERROR_WAY + error_way_offset);
+    if (idx < error_way_last_used_cycles.size()) {
+      error_way_last_used_cycles[idx] = error_way_cycle++;
+    }
+  }
+  /* ======================================== Hamoci End ======================================== */
 
   if (way != set_end) {
     if (way->valid && way->prefetch) {
@@ -934,3 +967,245 @@ void CACHE::print_deadlock()
   }
 }
 // LCOV_EXCL_STOP
+
+/* Hamoci Impl Start */
+bool CACHE::allocate_error_way(long way_idx)
+{
+  if constexpr (champsim::debug_print) {
+    fmt::print("[{}] Starting to allocate Way {} as Error Way across all {} sets\n", NAME, way_idx, NUM_SET);
+  }
+  fmt::print("[{}] Starting to allocate Way {} as Error Way across all {} sets\n", NAME, way_idx, NUM_SET);
+
+  if (error_way_count >= MAX_ERROR_WAY) {
+    fmt::print("[{}] Cannot allocate Way {} as Error Way because maximum number of Error Ways ({}) have already been allocated\n", NAME, way_idx, MAX_ERROR_WAY);
+    return false;
+  }
+
+  std::vector<long> failed_sets;
+
+  //모든 Set 순회
+  for (long set_idx = 0; set_idx < NUM_SET; set_idx++)
+  {
+    if (!evict_way_data(set_idx, way_idx)) {
+      failed_sets.push_back(set_idx);
+    }
+  }
+  if (!failed_sets.empty()) {
+    fmt::print("[{}] Failed to allocate Way {} as Error Way for Sets: ", NAME, way_idx);
+    for (const auto& set_idx : failed_sets) {
+      fmt::print("{} ", set_idx);
+    }
+    fmt::print("\n");
+    return false;
+  }
+
+  error_way_count++;
+
+  // 각 Set마다 Error Way들의 last_used_cycles를 추적
+  if (error_way_last_used_cycles.empty()) {
+    error_way_last_used_cycles.resize(static_cast<std::size_t>(NUM_SET * MAX_ERROR_WAY), 0);
+  }
+
+  return true;
+}
+
+bool CACHE::evict_way_data(long set_idx, long way_idx)
+{
+  auto [set_begin, set_end] = get_set_span_by_index(set_idx);
+  auto way = std::next(set_begin, way_idx);
+
+  // 이미 invalid면 성공
+  if (!way->valid) {
+    return true;
+  }
+
+  // Eviction 발생 로그 출력
+  fmt::print("[{}] EVICT: Set {} Way {} - Address 0x{:x}{}\n", 
+             NAME, set_idx, way_idx, way->address.to<uint64_t>(),
+             way->dirty ? " (dirty, writeback needed)" : " (clean)");
+
+  // Dirty이면 writeback
+  if (way->dirty) {
+    request_type writeback_packet;
+    writeback_packet.cpu = cpu;
+    writeback_packet.address = way->address;
+    writeback_packet.data = way->data;
+    writeback_packet.instr_id = 0;
+    writeback_packet.ip = champsim::address{};
+    writeback_packet.type = access_type::WRITE;
+    writeback_packet.pf_metadata = way->pf_metadata;
+    writeback_packet.response_requested = false;
+
+    auto success = lower_level->add_wq(writeback_packet);
+    if (!success) {
+      fmt::print("[{}] EVICT_FAIL: Set {} Way {} - WQ full\n", NAME, set_idx, way_idx);
+      return false;
+    }
+  }
+
+  way->valid = false;
+  way->dirty = false;
+  way->prefetch = false;
+
+  return true;
+}
+
+auto CACHE::get_set_span_by_index(long set_idx)
+    -> std::pair<set_type::iterator, set_type::iterator>
+{
+  assert(set_idx >= 0 && set_idx < NUM_SET);
+  auto begin = std::next(std::begin(block), set_idx * NUM_WAY);
+  return {begin, std::next(begin, NUM_WAY)};
+}
+
+auto CACHE::find_error_way(long set_idx,
+                            set_type::iterator set_begin,
+                            set_type::iterator set_end)
+    -> std::pair<set_type::iterator, long>
+{
+  /* ========================================
+   * Hamoci Modification: Error Way allocation only in LLC
+   * L1D, L2C should not allocate Error Ways
+   * ======================================== */
+  if (NAME != "LLC") {
+    // LLC가 아니면 일반 Way로 처리 (find_normal_way를 호출하지 않고 실패 반환)
+    // 상위 레벨에서는 Error 데이터를 일반 데이터처럼 처리
+    return {set_end, -1};
+  }
+
+  long error_count = error_way_count;
+
+  // ========== Case 1: Error Way가 없음 → 첫 할당 ==========
+  if (error_count == 0) {
+    long new_error_way = NUM_WAY - 1;  // Way 15 (마지막 Way)
+    fmt::print("[{}] ALLOC_NEW: Set {} triggering Way {} allocation (count: 0→1)\n", NAME, set_idx, new_error_way);
+    if (!allocate_error_way(new_error_way)) {
+      fmt::print("[{}] ALLOC_FAIL: Way {} allocation failed (count stays 0)\n", NAME, new_error_way);
+      return {set_end, -1};
+    }
+    fmt::print("[{}] ALLOC_OK: Way {} allocated (count now {})\n", NAME, new_error_way, error_way_count);
+    auto way = std::next(set_begin, new_error_way);
+    return {way, new_error_way};
+  }
+
+  // ========== Case 2: Error Way 존재 → 빈 공간 찾기 ==========
+  long error_start = get_error_way_start();
+  long error_end = NUM_WAY;
+
+  auto error_begin = std::next(set_begin, error_start);
+  auto error_finish = std::next(set_begin, error_end);
+
+  // 현재 Set의 Error Way 범위에서 빈 공간 찾기
+  auto empty_way = std::find_if_not(error_begin, error_finish,
+                                     [](auto& x) { return x.valid; });
+
+  if (empty_way != error_finish) {
+    long way_idx = std::distance(set_begin, empty_way);
+    return {empty_way, way_idx};
+  }
+
+  // ========== Case 3: 꽉 참 → 확장 가능? ==========
+  if (can_expand_error_way()) {
+    long new_error_way = error_start - 1;  // 예: 15 → 14 → 13...
+    fmt::print("[{}] EXPAND: Set {} expanding to Way {} (count: {}→{})\n", NAME, set_idx, new_error_way, error_count, error_count + 1);
+
+    if (!allocate_error_way(new_error_way)) {
+      fmt::print("[{}] EXPAND_FAIL: Way {} expansion failed\n", NAME, new_error_way);
+      return {set_end, -1};
+    }
+    fmt::print("[{}] EXPAND_OK: Way {} allocated (count now {})\n", NAME, new_error_way, error_way_count);
+    auto way = std::next(set_begin, new_error_way);
+    return {way, new_error_way};
+  }
+
+  // ========== Case 4: Error Way가 모두 꽉 참 → LRU victim 선택 ==========
+  long victim_idx = find_error_victim(set_idx, set_begin, error_begin, error_finish);
+  auto way = std::next(set_begin, victim_idx);
+  fmt::print("[{}] LRU_VICTIM: Set {} using Way {} (full, selecting LRU)\n", NAME, set_idx, victim_idx);
+  return {way, victim_idx};
+}
+
+auto CACHE::find_normal_way(const mshr_type& fill_mshr, long set_idx,
+                             set_type::iterator set_begin)
+    -> std::pair<set_type::iterator, long>
+{
+  // 일반 Way 범위 (전역)
+  long normal_end = get_normal_way_end();
+  auto normal_finish = std::next(set_begin, normal_end);
+
+  // 빈 Way 찾기 (일반 Way만)
+  auto way = std::find_if_not(set_begin, normal_finish,
+                               [](auto x) { return x.valid; });
+
+  if (way != normal_finish) {
+    long way_idx = std::distance(set_begin, way);
+    return {way, way_idx};
+  }
+
+  // Victim 선택 (일반 Way만)
+  long victim_idx = impl_find_victim(
+    fill_mshr.cpu, fill_mshr.instr_id, set_idx,
+    &*set_begin, fill_mshr.ip, fill_mshr.address, fill_mshr.type
+  );
+
+  if (victim_idx >= normal_end) {
+    victim_idx = 0;
+  }
+
+  way = std::next(set_begin, victim_idx);
+  return {way, victim_idx};
+}
+
+long CACHE::find_error_victim(long set_idx,
+                               set_type::iterator set_begin,
+                               set_type::iterator error_begin,
+                               set_type::iterator error_finish)
+{
+  /* ========================================
+   * Hamoci Modification: True LRU policy for Error Way victim selection
+   * Uses error_way_last_used_cycles to track access time
+   * ======================================== */
+
+  long error_start = get_error_way_start();
+
+  // Error Way 범위 내에서 빈 공간이 있는지 먼저 확인
+  for (auto it = error_begin; it != error_finish; ++it) {
+    if (!it->valid) {
+      long way_idx = std::distance(set_begin, it);
+      return way_idx;
+    }
+  }
+
+  // 모두 valid면 LRU 방식으로 victim 선택
+  // error_way_last_used_cycles에서 가장 오래된 Way 찾기
+  // 인덱싱: set_idx * MAX_ERROR_WAY + (way - error_start)
+
+  long victim_way = error_start;
+  uint64_t min_cycle = UINT64_MAX;
+
+  for (long way = error_start; way < NUM_WAY; ++way) {
+    long error_way_offset = way - error_start;
+    std::size_t idx = static_cast<std::size_t>(set_idx * MAX_ERROR_WAY + error_way_offset);
+
+    if (idx < error_way_last_used_cycles.size()) {
+      uint64_t last_used = error_way_last_used_cycles[idx];
+      if (last_used < min_cycle) {
+        min_cycle = last_used;
+        victim_way = way;
+      }
+    }
+  }
+
+  return victim_way;
+
+  /* ======================================== Hamoci End ======================================== */
+}
+
+bool CACHE::is_error_data(champsim::address addr) const
+{
+  auto& epm = ErrorPageManager::get_instance();
+  // Address 단위로 error 체크 (page 단위가 아님!)
+  return epm.is_error_address(addr);
+}
+
+/* Hamoci Impl End */

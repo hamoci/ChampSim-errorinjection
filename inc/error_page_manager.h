@@ -21,9 +21,10 @@ enum class ErrorPageManagerMode {
 };
 
 class ErrorPageManager {
-// Global Private Variables  
+// Global Private Variables
 private:
-    std::unordered_set<uint64_t> error_pages;
+    std::unordered_set<uint64_t> error_pages;  // Page 단위 error (기존 호환용)
+    std::unordered_set<uint64_t> error_addresses;  // Address 단위 error (신규)
     std::unordered_set<uint64_t> current_ppage; 
     ErrorPageManagerMode mode;
     champsim::chrono::clock::duration error_latency_penalty{};
@@ -71,10 +72,15 @@ public:
         return mode;
     }
 
-    // Error page management
+    // Error page management (기존 방식 - 호환용)
     void add_error_page(champsim::page_number page) { error_pages.insert(page.to<uint64_t>()); }
     void remove_error_page(champsim::page_number page) { error_pages.erase(page.to<uint64_t>()); }
     bool is_error_page(champsim::page_number page) const { return error_pages.find(page.to<uint64_t>()) != error_pages.end(); }
+
+    // Error address management (신규 - Address 단위)
+    void add_error_address(champsim::address addr) { error_addresses.insert(addr.to<uint64_t>()); }
+    void remove_error_address(champsim::address addr) { error_addresses.erase(addr.to<uint64_t>()); }
+    bool is_error_address(champsim::address addr) const { return error_addresses.find(addr.to<uint64_t>()) != error_addresses.end(); }
 
     // Monte Carlo Simulation for page error rate
     void init_page_error_rate(double bit_error_rate);
@@ -162,8 +168,10 @@ public:
 
     // Utility functions
     size_t get_error_page_count() const { return error_pages.size(); }
+    size_t get_error_address_count() const { return error_addresses.size(); }
     size_t get_current_ppage_count() const { return current_ppage.size(); }
     void clear_all_error_pages() { error_pages.clear(); }
+    void clear_all_error_addresses() { error_addresses.clear(); }
     void clear_current_ppage() { current_ppage.clear(); }
 
     // Inject Error at All Pages
