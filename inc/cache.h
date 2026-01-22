@@ -334,21 +334,11 @@ public:
   std::vector<uint64_t> error_way_last_used_cycles;
   uint64_t error_way_cycle = 0;
 
-  long get_normal_way_end() const {
-    return NUM_WAY - error_way_count;
-  }
-
-  long get_error_way_start() const {
-    return error_way_count > 0 ? (NUM_WAY - error_way_count) : -1;
-  }
-
-  long get_error_way_end() const{
-    return error_way_count > 0 ? NUM_WAY : -1;
-  }
-
-  bool can_expand_error_way() const{
-    return error_way_count < MAX_ERROR_WAY;
-  }
+  // Cache Pinning 관련 함수들 (구현은 cache.cc에서 ErrorPageManager 참조)
+  long get_normal_way_end() const;
+  long get_error_way_start() const;
+  long get_error_way_end() const;
+  bool can_expand_error_way() const;
 
   bool is_error_data(champsim::address addr) const;
 

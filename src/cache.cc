@@ -176,13 +176,15 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
   long set_idx = get_set_index(fill_mshr.address);
 
   /* ========================================
-   * Hamoci Start
+   * Hamoci Start: Cache Pinning (Error Way Partitioning)
    * ======================================== */
   set_type::iterator way;
   long way_idx;
 
-  if (is_error_data(fill_mshr.address) && NAME == "LLC") {
-    // Error 데이터 → LLC에서만 Error Way 사용
+  auto& epm = ErrorPageManager::get_instance();
+
+  if (epm.is_cache_pinning_enabled() && is_error_data(fill_mshr.address) && NAME == "LLC") {
+    // Cache Pinning 활성화 + Error 데이터 + LLC → Error Way 사용
     auto [error_way, error_way_idx] = find_error_way(set_idx, set_begin, set_end);
 
     // Debug output - show when find_error_way is called
@@ -192,6 +194,7 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
     way = error_way;
     way_idx = error_way_idx;
   } else {
+    // Cache Pinning 비활성화 또는 일반 데이터 → 기존 방식 (Normal Way)
     auto [normal_way, normal_way_idx] = find_normal_way(fill_mshr, set_idx, set_begin);
     way = normal_way;
     way_idx = normal_way_idx;
@@ -243,9 +246,9 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
                               fill_mshr.type);
 
   /* ========================================
-   * Hamoci Start
+   * Hamoci Start: Error Way timestamp update
    * ======================================== */
-  if (NAME == "LLC" && is_error_data(fill_mshr.address) && way_idx >= get_error_way_start() && way_idx < NUM_WAY) {
+  if (epm.is_cache_pinning_enabled() && NAME == "LLC" && is_error_data(fill_mshr.address) && way_idx >= get_error_way_start() && way_idx < NUM_WAY) {
     // Error Way에 데이터를 채웠으므로 타임스탬프 업데이트
     long error_way_offset = way_idx - get_error_way_start();
     std::size_t idx = static_cast<std::size_t>(set_idx * MAX_ERROR_WAY + error_way_offset);
@@ -1011,6 +1014,7 @@ bool CACHE::allocate_error_way(long way_idx)
 
 bool CACHE::evict_way_data(long set_idx, long way_idx)
 {
+  bool debug_mode = true; //hamoci: revise this for debug print
   auto [set_begin, set_end] = get_set_span_by_index(set_idx);
   auto way = std::next(set_begin, way_idx);
 
@@ -1020,10 +1024,11 @@ bool CACHE::evict_way_data(long set_idx, long way_idx)
   }
 
   // Eviction 발생 로그 출력
-  fmt::print("[{}] EVICT: Set {} Way {} - Address 0x{:x}{}\n", 
-             NAME, set_idx, way_idx, way->address.to<uint64_t>(),
-             way->dirty ? " (dirty, writeback needed)" : " (clean)");
-
+  if (debug_mode) {
+    fmt::print("[{}] EVICT: Set {} Way {} - Address 0x{:x}{}\n", 
+              NAME, set_idx, way_idx, way->address.to<uint64_t>(),
+              way->dirty ? " (dirty, writeback needed)" : " (clean)");
+  }
   // Dirty이면 writeback
   if (way->dirty) {
     request_type writeback_packet;
@@ -1206,6 +1211,42 @@ bool CACHE::is_error_data(champsim::address addr) const
   auto& epm = ErrorPageManager::get_instance();
   // Address 단위로 error 체크 (page 단위가 아님!)
   return epm.is_error_address(addr);
+}
+
+long CACHE::get_normal_way_end() const
+{
+  auto& epm = ErrorPageManager::get_instance();
+  if (!epm.is_cache_pinning_enabled()) {
+    return NUM_WAY;  // 모든 Way가 Normal Way
+  }
+  return NUM_WAY - error_way_count;
+}
+
+long CACHE::get_error_way_start() const
+{
+  auto& epm = ErrorPageManager::get_instance();
+  if (!epm.is_cache_pinning_enabled()) {
+    return NUM_WAY;  // Error Way 없음 (범위 밖)
+  }
+  return error_way_count > 0 ? (NUM_WAY - error_way_count) : NUM_WAY;
+}
+
+long CACHE::get_error_way_end() const
+{
+  auto& epm = ErrorPageManager::get_instance();
+  if (!epm.is_cache_pinning_enabled()) {
+    return NUM_WAY;  // Error Way 없음
+  }
+  return error_way_count > 0 ? NUM_WAY : NUM_WAY;
+}
+
+bool CACHE::can_expand_error_way() const
+{
+  auto& epm = ErrorPageManager::get_instance();
+  if (!epm.is_cache_pinning_enabled()) {
+    return false;  // Cache Pinning 비활성화 시 확장 불가
+  }
+  return error_way_count < MAX_ERROR_WAY;
 }
 
 /* Hamoci Impl End */

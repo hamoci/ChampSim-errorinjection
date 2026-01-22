@@ -419,6 +419,12 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
 
     # Set CPU clock period for CYCLE mode
     yield f'  epm.set_cpu_clock_period(champsim::chrono::picoseconds{{{global_clock_period}}});'
+
+    # Cache Pinning configuration
+    if error_page_manager.get('cache_pinning', False):
+        yield '  epm.set_cache_pinning_enabled(true);'
+    else:
+        yield '  epm.set_cache_pinning_enabled(false);'
     yield '}'
     yield ''
 

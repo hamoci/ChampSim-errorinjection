@@ -384,9 +384,12 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
         ErrorPageManager::get_instance().record_error_access();
 
         // Debug output - show when error occurs
-        fmt::print("[ERROR_OCCUR] Address: 0x{:x} (Total Errors: {})\n",
-                   pkt->value().address.to<uint64_t>(),
-                   ErrorPageManager::get_instance().get_error_address_count());
+        bool debug_mode = true; //hamoci: revise this for debug print
+        if(debug_mode) {
+          fmt::print("[ERROR_OCCUR] Address: 0x{:x} (Total Errors: {})\n",
+                    pkt->value().address.to<uint64_t>(),
+                    ErrorPageManager::get_instance().get_error_address_count());
+        }
       }
 
       // this bank is now busy

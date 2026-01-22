@@ -52,6 +52,10 @@ private:
     uint64_t pending_error_count{0};  // Counter for pending errors
     int debug{0};  // Debug flag: 1 to enable [ERROR_CYCLE] logs, 0 to disable
 
+// Cache Pinning (Error Way Partitioning)
+private:
+    bool cache_pinning_enabled{false};  // Enable/disable cache pinning feature
+
 
 // Error Statistics
 private:
@@ -121,6 +125,10 @@ public:
     // Debug mode setter/getter
     void set_debug(int debug_mode) { debug = debug_mode; }
     int get_debug() const { return debug; }
+
+    // Cache Pinning setter/getter
+    void set_cache_pinning_enabled(bool enabled) { cache_pinning_enabled = enabled; }
+    bool is_cache_pinning_enabled() const { return cache_pinning_enabled; }
 
     // Update cycle error counter (called from operate() every cycle)
     void update_cycle_errors(champsim::chrono::clock::time_point current_time) {
