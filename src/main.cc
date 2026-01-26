@@ -134,6 +134,10 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
     cache.impl_replacement_final_stats();
   }
 
+  for (CACHE& cache : gen_environment.cache_view()) {
+    cache.print_error_way_stats();
+  }
+
   if (json_option->count() > 0) {
     if (json_file_name.empty()) {
       champsim::json_printer{std::cout}.print(phase_stats);

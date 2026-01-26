@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <numeric>
 #include <fmt/core.h>
@@ -182,15 +183,16 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
   long way_idx;
 
   auto& epm = ErrorPageManager::get_instance();
-
+  bool debug_mode = false; //Hamoci: for Debug Print
   if (epm.is_cache_pinning_enabled() && is_error_data(fill_mshr.address) && NAME == "LLC") {
     // Cache Pinning 활성화 + Error 데이터 + LLC → Error Way 사용
     auto [error_way, error_way_idx] = find_error_way(set_idx, set_begin, set_end);
 
     // Debug output - show when find_error_way is called
-    fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, Set: {}, Way: {}\n",
-               fill_mshr.address.to<uint64_t>(), set_idx, error_way_idx);
-
+    if(debug_mode){
+      fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, Set: {}, Way: {}\n",
+               fill_mshr.address.to<uint64_t>(), set_idx, error_way_idx);  
+    }
     way = error_way;
     way_idx = error_way_idx;
   } else {
@@ -324,6 +326,25 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
       ++sim_stats.pf_useful;
       way->prefetch = false;
     }
+
+    /* ========================================
+     * Hamoci: Error Way Hit 시 타임스탬프 업데이트
+     * lru.cc의 last_used_cycles와 별개로 Error Way 전용 LRU 관리
+     * ======================================== */
+    auto& epm = ErrorPageManager::get_instance();
+    if (epm.is_cache_pinning_enabled() && NAME == "LLC") {
+      long error_way_start = get_error_way_start();
+      if (way_idx >= error_way_start && way_idx < NUM_WAY) {
+        // Error Way Hit → 타임스탬프 업데이트
+        long set_idx = get_set_index(handle_pkt.address);
+        long error_way_offset = way_idx - error_way_start;
+        std::size_t idx = static_cast<std::size_t>(set_idx * MAX_ERROR_WAY + error_way_offset);
+        if (idx < error_way_last_used_cycles.size()) {
+          error_way_last_used_cycles[idx] = error_way_cycle++;
+        }
+      }
+    }
+    /* ======================================== Hamoci End ======================================== */
   }
 
   return hit;
@@ -877,6 +898,9 @@ void CACHE::initialize()
 {
   impl_prefetcher_initialize();
   impl_initialize_replacement();
+
+  // Hamoci: 시드 고정 (ErrorPageManager와 동일한 시드 사용)
+  std::srand(54321);
 }
 
 void CACHE::begin_phase()
@@ -977,7 +1001,6 @@ bool CACHE::allocate_error_way(long way_idx)
   if constexpr (champsim::debug_print) {
     fmt::print("[{}] Starting to allocate Way {} as Error Way across all {} sets\n", NAME, way_idx, NUM_SET);
   }
-  fmt::print("[{}] Starting to allocate Way {} as Error Way across all {} sets\n", NAME, way_idx, NUM_SET);
 
   if (error_way_count >= MAX_ERROR_WAY) {
     fmt::print("[{}] Cannot allocate Way {} as Error Way because maximum number of Error Ways ({}) have already been allocated\n", NAME, way_idx, MAX_ERROR_WAY);
@@ -1014,7 +1037,7 @@ bool CACHE::allocate_error_way(long way_idx)
 
 bool CACHE::evict_way_data(long set_idx, long way_idx)
 {
-  bool debug_mode = true; //hamoci: revise this for debug print
+  bool debug_mode = false; //hamoci: revise this for debug print
   auto [set_begin, set_end] = get_set_span_by_index(set_idx);
   auto way = std::next(set_begin, way_idx);
 
@@ -1126,7 +1149,10 @@ auto CACHE::find_error_way(long set_idx,
   // ========== Case 4: Error Way가 모두 꽉 참 → LRU victim 선택 ==========
   long victim_idx = find_error_victim(set_idx, set_begin, error_begin, error_finish);
   auto way = std::next(set_begin, victim_idx);
-  fmt::print("[{}] LRU_VICTIM: Set {} using Way {} (full, selecting LRU)\n", NAME, set_idx, victim_idx);
+  bool debug_mode = false; //hamoci: revise this for debug print
+  if (debug_mode) {
+    fmt::print("[{}] LRU_VICTIM: Set {} using Way {} (full, selecting LRU)\n", NAME, set_idx, victim_idx);
+  }
   return {way, victim_idx};
 }
 
@@ -1153,8 +1179,9 @@ auto CACHE::find_normal_way(const mshr_type& fill_mshr, long set_idx,
     &*set_begin, fill_mshr.ip, fill_mshr.address, fill_mshr.type
   );
 
+  // Error Way가 선택되면 Normal Way 범위 내에서 random 선택
   if (victim_idx >= normal_end) {
-    victim_idx = 0;
+    victim_idx = std::rand() % normal_end;
   }
 
   way = std::next(set_begin, victim_idx);
@@ -1209,8 +1236,9 @@ long CACHE::find_error_victim(long set_idx,
 bool CACHE::is_error_data(champsim::address addr) const
 {
   auto& epm = ErrorPageManager::get_instance();
-  // Address 단위로 error 체크 (page 단위가 아님!)
-  return epm.is_error_address(addr);
+  // 64B 정렬된 주소로 체크 (캐시 라인 단위)
+  auto aligned_addr = champsim::address{addr.to<uint64_t>() >> 6};
+  return epm.is_error_address(aligned_addr);
 }
 
 long CACHE::get_normal_way_end() const
@@ -1247,6 +1275,48 @@ bool CACHE::can_expand_error_way() const
     return false;  // Cache Pinning 비활성화 시 확장 불가
   }
   return error_way_count < MAX_ERROR_WAY;
+}
+
+void CACHE::print_error_way_stats() const
+{
+  auto& epm = ErrorPageManager::get_instance();
+  
+  // LLC이고 Cache Pinning이 활성화되어 있을 때만 출력
+  if (NAME != "LLC" || !epm.is_cache_pinning_enabled() || error_way_count == 0) {
+    return;
+  }
+
+  // 총 Error Way 슬롯 개수 (Way 수 × Set 수)
+  long total_error_way_slots = NUM_SET * error_way_count;
+  long used_error_way_slots = 0;
+
+  // Error Way 범위 확인
+  long error_way_start = get_error_way_start();
+
+  // 모든 Set 순회하면서 Error Way의 valid 비트 체크
+  for (long set_idx = 0; set_idx < NUM_SET; ++set_idx) {
+    for (long way_offset = 0; way_offset < error_way_count; ++way_offset) {
+      long way_idx = error_way_start + way_offset;
+      const auto& blk = block[set_idx * NUM_WAY + way_idx];
+      if (blk.valid) {
+        ++used_error_way_slots;
+      }
+    }
+  }
+
+  // 사용되지 않는 Error Way 슬롯 개수 및 비율 계산
+  long unused_error_way_slots = total_error_way_slots - used_error_way_slots;
+  double usage_percentage = (total_error_way_slots > 0) ? 
+                            (static_cast<double>(used_error_way_slots) / static_cast<double>(total_error_way_slots) * 100.0) : 0.0;
+
+  fmt::print("\n{} Error Way Statistics:\n", NAME);
+  fmt::print("  Allocated Error Ways per Set: {}\n", error_way_count);
+  fmt::print("  Total Error Way Slots: {} (= {} Sets × {} Ways)\n", 
+             total_error_way_slots, NUM_SET, error_way_count);
+  fmt::print("  Used Error Way Slots: {} ({:.2f}%)\n", 
+             used_error_way_slots, usage_percentage);
+  fmt::print("  Unused Error Way Slots: {} ({:.2f}%)\n", 
+             unused_error_way_slots, 100.0 - usage_percentage);
 }
 
 /* Hamoci Impl End */

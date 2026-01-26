@@ -342,6 +342,9 @@ public:
 
   bool is_error_data(champsim::address addr) const;
 
+  // Error Way 통계 출력
+  void print_error_way_stats() const;
+
 private:
   // 모든 Set의 특정 Way를 Error로 전환
   bool allocate_error_way(long way_idx);

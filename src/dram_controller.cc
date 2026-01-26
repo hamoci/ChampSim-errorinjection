@@ -377,18 +377,33 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       // CYCLE mode: Consume error from counter
       else if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE &&
                ErrorPageManager::get_instance().consume_cycle_error()) {
-        // Register this ADDRESS as an error address (not page!)
-        ErrorPageManager::get_instance().add_error_address(pkt->value().address);
+        // 64B 정렬된 주소 (캐시 라인 단위)
+        auto aligned_addr = champsim::address{pkt->value().address.to<uint64_t>() >> 6};
 
-        error_latency = ErrorPageManager::get_instance().get_error_latency();
+        bool already_registered = false;
+
+        // Cache Pinning 활성화 시에만 중복 체크
+        if (ErrorPageManager::get_instance().is_cache_pinning_enabled()) {
+          // 이미 등록된 캐시 라인인지 체크
+          already_registered = ErrorPageManager::get_instance().is_error_address(aligned_addr);
+          // 64B 정렬된 주소로 등록
+          ErrorPageManager::get_instance().add_error_address(aligned_addr);
+        }
+
+        // Cache Pinning 비활성화 또는 새로운 캐시 라인일 때 latency 부여
+        if (!already_registered) {
+          error_latency = ErrorPageManager::get_instance().get_error_latency();
+        }
         ErrorPageManager::get_instance().record_error_access();
 
         // Debug output - show when error occurs
-        bool debug_mode = true; //hamoci: revise this for debug print
+        bool debug_mode = false; //hamoci: revise this for debug print
         if(debug_mode) {
-          fmt::print("[ERROR_OCCUR] Address: 0x{:x} (Total Errors: {})\n",
+          fmt::print("[ERROR_OCCUR] Address: 0x{:x} Aligned: 0x{:x} (Total Errors: {}) {}\n",
                     pkt->value().address.to<uint64_t>(),
-                    ErrorPageManager::get_instance().get_error_address_count());
+                    aligned_addr.to<uint64_t>(),
+                    ErrorPageManager::get_instance().get_error_address_count(),
+                    already_registered ? "(already registered)" : "(new)");
         }
       }
 
