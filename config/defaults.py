@@ -95,8 +95,10 @@ def error_page_manager_defaults():
     return {
         'mode': 'OFF',
         'error_latency_penalty': 0,
+        'pte_error_latency_penalty': 0,
         'bit_error_rate': 0.0,
         'errors_per_interval': 1,
         'error_cycle_interval': 0,
-        'cache_pinning': False
+        'cache_pinning': False,
+        'dynamic_error_latency': True
     }

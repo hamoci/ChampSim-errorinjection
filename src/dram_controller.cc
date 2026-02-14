@@ -28,6 +28,25 @@
 #include "util/bits.h" // for lg2, bitmask
 #include "util/span.h"
 #include "util/units.h"
+#include "vmem.h"      // For dynamic error latency calculation
+#include "ptw.h"       // For PSC access
+#include "cache.h"     // For cache lookup
+
+namespace
+{
+// Local debug switch for focused dynamic error-latency traces.
+// Toggle this directly in code without enabling global champsim::debug_print.
+constexpr bool debug_dynamic_error_latency = false;
+
+uint64_t to_cpu_cycles(champsim::chrono::clock::duration latency)
+{
+  auto cpu_period = ErrorPageManager::get_instance().get_cpu_clock_period();
+  if (cpu_period.count() == 0) {
+    return 0;
+  }
+  return static_cast<uint64_t>(latency / cpu_period);
+}
+}
 
 MEMORY_CONTROLLER::MEMORY_CONTROLLER(champsim::chrono::picoseconds dbus_period, champsim::chrono::picoseconds mc_period, std::size_t t_rp, std::size_t t_rcd,
                                      std::size_t t_cas, std::size_t t_ras, champsim::chrono::microseconds refresh_period, std::vector<channel_type*>&& ul,
@@ -367,7 +386,28 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       // RANDOM mode: BER-based error check
       if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM &&
           ErrorPageManager::get_instance().check_page_error()) {
-        error_latency = ErrorPageManager::get_instance().get_error_latency();
+        // Select latency based on access type and dynamic/fixed mode
+        if (ErrorPageManager::get_instance().is_dynamic_error_latency_enabled()) {
+          std::optional<champsim::address> vaddr_hint = std::nullopt;
+          if (pkt->value().type == access_type::TRANSLATION) {
+            vaddr_hint = pkt->value().v_address;
+          }
+          error_latency = calculate_dynamic_error_latency(pkt->value().cpu, pkt->value().address, vaddr_hint);
+          if (debug_dynamic_error_latency) {
+            fmt::print("[ERR_LAT][RANDOM][DYNAMIC] type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                       access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                       pkt->value().address.to<uint64_t>(), pkt->value().cpu, to_cpu_cycles(error_latency));
+          }
+        } else if (pkt->value().type == access_type::TRANSLATION) {
+          error_latency = ErrorPageManager::get_instance().get_pte_error_latency();
+        } else {
+          error_latency = ErrorPageManager::get_instance().get_error_latency();
+          if (debug_dynamic_error_latency) {
+            fmt::print("[ERR_LAT][RANDOM][FIXED] type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                       access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                       pkt->value().address.to<uint64_t>(), pkt->value().cpu, to_cpu_cycles(error_latency));
+          }
+        }
         ErrorPageManager::get_instance().record_error_access();
         //for debug
         //fmt::print("[DRAM_BER_ERROR] Page error occurred! address={} page_error_rate={:.2e} additional_latency={} cycles, dram access ={}\n",
@@ -392,18 +432,40 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
 
         // Cache Pinning 비활성화 또는 새로운 캐시 라인일 때 latency 부여
         if (!already_registered) {
-          error_latency = ErrorPageManager::get_instance().get_error_latency();
+          // Select latency based on access type and dynamic/fixed mode
+          if (ErrorPageManager::get_instance().is_dynamic_error_latency_enabled()) {
+            std::optional<champsim::address> vaddr_hint = std::nullopt;
+            if (pkt->value().type == access_type::TRANSLATION) {
+              vaddr_hint = pkt->value().v_address;
+            }
+            error_latency = calculate_dynamic_error_latency(pkt->value().cpu, pkt->value().address, vaddr_hint);
+            if (debug_dynamic_error_latency) {
+              fmt::print("[ERR_LAT][CYCLE][DYNAMIC] type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                         access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                         pkt->value().address.to<uint64_t>(), pkt->value().cpu, to_cpu_cycles(error_latency));
+            }
+          } else if (pkt->value().type == access_type::TRANSLATION) {
+            error_latency = ErrorPageManager::get_instance().get_pte_error_latency();
+          } else {
+            error_latency = ErrorPageManager::get_instance().get_error_latency();
+            if (debug_dynamic_error_latency) {
+              fmt::print("[ERR_LAT][CYCLE][FIXED] type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                         access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                         pkt->value().address.to<uint64_t>(), pkt->value().cpu, to_cpu_cycles(error_latency));
+            }
+          }
         }
         ErrorPageManager::get_instance().record_error_access();
 
         // Debug output - show when error occurs
         bool debug_mode = false; //hamoci: revise this for debug print
         if(debug_mode) {
-          fmt::print("[ERROR_OCCUR] Address: 0x{:x} Aligned: 0x{:x} (Total Errors: {}) {}\n",
+          fmt::print("[ERROR_OCCUR] Address: 0x{:x} Aligned: 0x{:x} (Total Errors: {}) {} (PinnedLines: {})\n",
                     pkt->value().address.to<uint64_t>(),
                     aligned_addr.to<uint64_t>(),
-                    ErrorPageManager::get_instance().get_error_address_count(),
-                    already_registered ? "(already registered)" : "(new)");
+                    ErrorPageManager::get_instance().get_total_error_count(),
+                    already_registered ? "(already registered)" : "(new)",
+                    ErrorPageManager::get_instance().get_error_address_count());
         }
       }
 
@@ -456,6 +518,8 @@ void MEMORY_CONTROLLER::initialize()
 
   fmt::print("[ERROR_PAGE_MANAGER] Error latency: {} \n",
              ErrorPageManager::get_instance().get_error_latency().count());
+  fmt::print("[ERROR_PAGE_MANAGER] Dynamic error latency: {}\n",
+             ErrorPageManager::get_instance().is_dynamic_error_latency_enabled() ? "ON" : "OFF (fixed)");
   fmt::print("[ERROR_PAGE_MANAGER] Random seed: 54321 (fixed for preload reproducibility)\n");
   
   if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::ALL_ON) {
@@ -489,6 +553,13 @@ void MEMORY_CONTROLLER::initialize()
       ErrorPageManager::get_instance().get_error_cycle_interval());
   } else {
     fmt::print("[ERROR_PAGE_MANAGER] Error pages off\n");
+  }
+
+  // Set references for dynamic error latency calculation
+  for (auto& chan : channels) {
+    chan.set_vmem(vmem);
+    chan.set_ptws(ptws);
+    chan.set_caches(caches);
   }
 }
 
@@ -636,10 +707,123 @@ void MEMORY_CONTROLLER::initiate_requests()
 }
 
 DRAM_CHANNEL::request_type::request_type(const typename champsim::channel::request_type& req)
-    : pf_metadata(req.pf_metadata), address(req.address), v_address(req.address), data(req.data), instr_depend_on_me(req.instr_depend_on_me)
+    : pf_metadata(req.pf_metadata), cpu(req.cpu), type(req.type), address(req.address), v_address(req.v_address), data(req.data), instr_depend_on_me(req.instr_depend_on_me)
 {
   asid[0] = req.asid[0];
   asid[1] = req.asid[1];
+}
+
+champsim::chrono::clock::duration DRAM_CHANNEL::calculate_dynamic_error_latency(uint32_t cpu_num, champsim::address paddr,
+                                                                                std::optional<champsim::address> vaddr_hint)
+{
+  if (debug_dynamic_error_latency) {
+    fmt::print("[ERR_LAT] begin emulate_ptw cpu={} paddr=0x{:x} hint_vaddr={}\n",
+               cpu_num, paddr.to<uint64_t>(), vaddr_hint.has_value() ? "yes" : "no");
+  }
+
+  // Check if references are available
+  if (!vmem || ptws.empty() || caches.empty() || cpu_num >= ptws.size()) {
+    // Fallback to fixed latency if references not available
+    if (debug_dynamic_error_latency) {
+      fmt::print("[ERR_LAT] fallback fixed latency (missing refs) = {} cycles\n",
+                 to_cpu_cycles(ErrorPageManager::get_instance().get_error_latency()));
+    }
+    return ErrorPageManager::get_instance().get_error_latency();
+  }
+
+  champsim::page_number vpage{};
+  const char* vaddr_source = "reverse-map";
+  if (vaddr_hint.has_value()) {
+    vpage = champsim::page_number{*vaddr_hint};
+    vaddr_source = "hint";
+  } else {
+    // Get physical page number
+    champsim::page_number ppage{paddr};
+
+    // Reverse lookup: physical page → virtual page
+    auto vpage_opt = vmem->get_vpage_for_ppage(cpu_num, ppage);
+    if (!vpage_opt.has_value()) {
+      // If no mapping found, use fixed latency
+      if (debug_dynamic_error_latency) {
+        fmt::print("[ERR_LAT] fallback fixed latency (reverse-map miss) = {} cycles\n",
+                   to_cpu_cycles(ErrorPageManager::get_instance().get_error_latency()));
+      }
+      return ErrorPageManager::get_instance().get_error_latency();
+    }
+    vpage = vpage_opt.value();
+  }
+
+  champsim::address vaddr{vpage};
+  PageTableWalker* ptw = ptws[cpu_num];
+  if (debug_dynamic_error_latency) {
+    fmt::print("[ERR_LAT] vaddr source={} vpage=0x{:x}\n", vaddr_source, vpage.to<uint64_t>());
+  }
+
+  // Check PSC to determine starting level
+  std::size_t start_level = vmem->pt_levels;
+  auto psc_level = ptw->get_psc_cached_level(vaddr);
+  if (psc_level.has_value()) {
+    // PSC hit: start from the cached level (skip higher levels)
+    start_level = psc_level.value();
+  }
+  // Guard invalid PSC-derived levels.
+  start_level = std::max<std::size_t>(1, std::min<std::size_t>(start_level, vmem->pt_levels));
+  if (debug_dynamic_error_latency) {
+    if (psc_level.has_value()) {
+      fmt::print("[ERR_LAT] PSC hit -> start_level={} (pt_levels={})\n", start_level, vmem->pt_levels);
+    } else {
+      fmt::print("[ERR_LAT] PSC miss -> start_level={} (full walk, pt_levels={})\n", start_level, vmem->pt_levels);
+    }
+  }
+
+  // Calculate latency for each page table level
+  // Start from PSC-determined level down to level 1
+  champsim::chrono::clock::duration total_latency = champsim::chrono::clock::duration::zero();
+  auto cpu_period = ErrorPageManager::get_instance().get_cpu_clock_period();
+  if (cpu_period.count() == 0) {
+    cpu_period = clock_period;
+  }
+  const champsim::chrono::clock::duration DRAM_LATENCY = 200 * cpu_period;
+
+  for (std::size_t level = start_level; level > 0; --level) {
+    // Probe only existing PTE state. This latency model must not allocate new mappings.
+    auto pte_paddr = vmem->get_pte_pa_if_present(cpu_num, vpage, level);
+    if (!pte_paddr.has_value()) {
+      total_latency += DRAM_LATENCY;
+      if (debug_dynamic_error_latency) {
+        fmt::print("[ERR_LAT] level {}: PTE unmapped -> DRAM (+200), total={} cycles\n", level, to_cpu_cycles(total_latency));
+      }
+      continue;
+    }
+
+    // Order-independent cache hierarchy check:
+    // use the minimum hit latency among caches that currently contain the PTE line.
+    champsim::chrono::clock::duration level_latency = DRAM_LATENCY;
+    const char* hit_cache = nullptr;
+    for (CACHE* cache : caches) {
+      if (cache->is_address_in_cache(*pte_paddr)) {
+        if (cache->HIT_LATENCY < level_latency) {
+          level_latency = cache->HIT_LATENCY;
+          hit_cache = cache->NAME.c_str();
+        }
+      }
+    }
+
+    total_latency += level_latency;
+    if (debug_dynamic_error_latency) {
+      if (hit_cache != nullptr) {
+        fmt::print("[ERR_LAT] level {}: cache hit({}) +{} cycles, total={} cycles\n",
+                   level, hit_cache, to_cpu_cycles(level_latency), to_cpu_cycles(total_latency));
+      } else {
+        fmt::print("[ERR_LAT] level {}: cache miss -> DRAM (+200), total={} cycles\n", level, to_cpu_cycles(total_latency));
+      }
+    }
+  }
+
+  if (debug_dynamic_error_latency) {
+    fmt::print("[ERR_LAT] final dynamic error latency={} cycles\n", to_cpu_cycles(total_latency));
+  }
+  return total_latency;
 }
 
 bool MEMORY_CONTROLLER::add_rq(const request_type& packet, champsim::channel* ul)

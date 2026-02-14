@@ -165,6 +165,20 @@ public:
     return std::exchange(*hit, {}).data;
   }
 
+  // Read-only check without updating LRU state
+  // Returns the cached value if found, otherwise std::nullopt
+  std::optional<value_type> peek(const value_type& elem) const
+  {
+    auto [set_begin, set_end] = const_cast<lru_table*>(this)->get_set_span(elem);
+    auto hit = std::find_if(set_begin, set_end, const_cast<lru_table*>(this)->match_func(elem));
+
+    if (hit == set_end) {
+      return std::nullopt;
+    }
+
+    return hit->data;
+  }
+
   lru_table(std::size_t sets, std::size_t ways, SetProj set_proj, TagProj tag_proj)
       : set_projection(set_proj), tag_projection(tag_proj), NUM_SET(static_cast<diff_type>(sets)), NUM_WAY(static_cast<diff_type>(ways)), block(sets * ways)
   {

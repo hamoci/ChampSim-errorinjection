@@ -344,7 +344,7 @@ class NormalizedConfiguration:
         vmem = util.chain(
             transform_for_keys(self.vmem, ('pte_page_size',), int_or_prefixed_size),
             self.vmem,
-            { 'pte_page_size': int_or_prefixed_size("4kB"), 'num_levels': 5, 'minor_fault_penalty': 200, 'randomization': 1}
+            { 'pte_page_size': int_or_prefixed_size("4kB"), 'num_levels': 5, 'minor_fault_penalty': 200, 'data_page_fault_4kb': 3956, 'data_page_fault_2mb': 109200, 'randomization': 1}
         )
 
         # Give cores numeric indices and default cache names

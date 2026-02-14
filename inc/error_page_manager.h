@@ -28,6 +28,7 @@ private:
     std::unordered_set<uint64_t> current_ppage; 
     ErrorPageManagerMode mode;
     champsim::chrono::clock::duration error_latency_penalty{};
+    champsim::chrono::clock::duration pte_error_latency_penalty{};
     static std::unique_ptr<ErrorPageManager> instance;
 
 //For Random Error Injection
@@ -55,6 +56,7 @@ private:
 // Cache Pinning (Error Way Partitioning)
 private:
     bool cache_pinning_enabled{false};  // Enable/disable cache pinning feature
+    bool dynamic_error_latency_enabled{true};  // true: emulate PTW(PSC+cache), false: fixed error_latency_penalty
 
 
 // Error Statistics
@@ -92,6 +94,8 @@ public:
     // Latency management
     void set_error_latency(champsim::chrono::clock::duration latency) { error_latency_penalty = latency; }
     champsim::chrono::clock::duration get_error_latency() const { return error_latency_penalty; }
+    void set_pte_error_latency(champsim::chrono::clock::duration latency) { pte_error_latency_penalty = latency; }
+    champsim::chrono::clock::duration get_pte_error_latency() const { return pte_error_latency_penalty; }
 
     // Random error injection settings
     //void set_base_error_probability(double prob) { base_error_probability = prob; }
@@ -129,6 +133,10 @@ public:
     // Cache Pinning setter/getter
     void set_cache_pinning_enabled(bool enabled) { cache_pinning_enabled = enabled; }
     bool is_cache_pinning_enabled() const { return cache_pinning_enabled; }
+
+    // Dynamic/Fixed error latency mode setter/getter
+    void set_dynamic_error_latency_enabled(bool enabled) { dynamic_error_latency_enabled = enabled; }
+    bool is_dynamic_error_latency_enabled() const { return dynamic_error_latency_enabled; }
 
     // Update cycle error counter (called from operate() every cycle)
     void update_cycle_errors(champsim::chrono::clock::time_point current_time) {

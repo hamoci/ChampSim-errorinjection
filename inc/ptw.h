@@ -87,6 +87,8 @@ public:
   const champsim::chrono::clock::duration HIT_LATENCY;
 
   std::vector<pscl_type> pscl;
+  // Absolute page-table level for each PSC cache entry in `pscl` (same index).
+  std::vector<std::size_t> pscl_levels;
   VirtualMemory* vmem;
 
   const champsim::address CR3_addr;
@@ -97,6 +99,11 @@ public:
 
   void begin_phase() final;
   void print_deadlock() final;
+
+  // Helper function for dynamic error latency calculation
+  // Returns the lowest cached level in PSC for the given virtual address
+  // Returns std::nullopt if no level is cached
+  [[nodiscard]] std::optional<std::size_t> get_psc_cached_level(champsim::address vaddr) const;
 };
 
 #endif

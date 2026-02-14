@@ -90,10 +90,19 @@ struct DRAM_ADDRESS_MAPPING {
   std::size_t channels() const;
 };
 
+class VirtualMemory;
+class PageTableWalker;
+class CACHE;
+
 struct DRAM_CHANNEL final : public champsim::operable {
   using response_type = typename champsim::channel::response_type;
 
   const DRAM_ADDRESS_MAPPING address_mapping;
+
+  // References for dynamic error latency calculation
+  VirtualMemory* vmem = nullptr;
+  std::vector<PageTableWalker*> ptws;
+  std::vector<CACHE*> caches;
 
   struct request_type {
     bool scheduled = false;
@@ -102,6 +111,9 @@ struct DRAM_CHANNEL final : public champsim::operable {
     uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
 
     uint32_t pf_metadata = 0;
+    uint32_t cpu = std::numeric_limits<uint32_t>::max();
+
+    access_type type{access_type::LOAD};
 
     champsim::address address{};
     champsim::address v_address{};
@@ -166,6 +178,15 @@ struct DRAM_CHANNEL final : public champsim::operable {
                std::size_t t_ras, champsim::chrono::microseconds refresh_period, std::size_t refreshes_per_period, champsim::data::bytes width,
                std::size_t rq_size, std::size_t wq_size, DRAM_ADDRESS_MAPPING addr_mapper);
 
+  void set_vmem(VirtualMemory* vm) { vmem = vm; }
+  void set_ptws(std::vector<PageTableWalker*> p) { ptws = p; }
+  void set_caches(std::vector<CACHE*> c) { caches = c; }
+
+  // Calculate dynamic error latency for data/translation access.
+  // vaddr_hint is used when reverse mapping from paddr is unavailable (e.g., TRANSLATION error path).
+  champsim::chrono::clock::duration calculate_dynamic_error_latency(uint32_t cpu_num, champsim::address paddr,
+                                                                    std::optional<champsim::address> vaddr_hint = std::nullopt);
+
   void check_write_collision();
   void check_read_collision();
   long finish_dbus_request();
@@ -203,6 +224,11 @@ class MEMORY_CONTROLLER : public champsim::operable
   // data bus period
   champsim::chrono::picoseconds data_bus_period{};
 
+  // References for dynamic error latency calculation
+  VirtualMemory* vmem = nullptr;
+  std::vector<PageTableWalker*> ptws;
+  std::vector<CACHE*> caches;
+
 public:
   std::vector<DRAM_CHANNEL> channels;
 
@@ -216,6 +242,10 @@ public:
   void begin_phase() final;
   void end_phase(unsigned cpu) final;
   void print_deadlock() final;
+
+  void set_vmem(VirtualMemory* vm) { vmem = vm; }
+  void set_ptws(std::vector<PageTableWalker*> p) { ptws = p; }
+  void set_caches(std::vector<CACHE*> c) { caches = c; }
 
   [[nodiscard]] champsim::data::bytes size() const;
 

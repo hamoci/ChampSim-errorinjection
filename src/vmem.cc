@@ -25,10 +25,14 @@
 
 using namespace champsim::data::data_literals;
 
-VirtualMemory::VirtualMemory(champsim::data::bytes page_table_page_size, std::size_t page_table_levels, champsim::chrono::clock::duration minor_penalty,
+VirtualMemory::VirtualMemory(champsim::data::bytes page_table_page_size, std::size_t page_table_levels,
+                             champsim::chrono::clock::duration minor_penalty,
+                             champsim::chrono::clock::duration data_4kb_penalty,
+                             champsim::chrono::clock::duration data_2mb_penalty,
                              MEMORY_CONTROLLER& dram_, std::optional<uint64_t> randomization_seed_)
-    : randomization_seed(randomization_seed_), dram(dram_), minor_fault_penalty(minor_penalty), pt_levels(page_table_levels),
-      pte_page_size(page_table_page_size),
+    : randomization_seed(randomization_seed_), dram(dram_), minor_fault_penalty(minor_penalty),
+      data_page_fault_4kb_penalty(data_4kb_penalty), data_page_fault_2mb_penalty(data_2mb_penalty),
+      pt_levels(page_table_levels), pte_page_size(page_table_page_size),
       next_pte_page(
           champsim::dynamic_extent{champsim::data::bits{LOG2_PAGE_SIZE}, champsim::data::bits{champsim::lg2(champsim::data::bytes{pte_page_size}.count())}}, 0)
 {
@@ -49,9 +53,12 @@ VirtualMemory::VirtualMemory(champsim::data::bytes page_table_page_size, std::si
   shuffle_pages();
 }
 
-VirtualMemory::VirtualMemory(champsim::data::bytes page_table_page_size, std::size_t page_table_levels, champsim::chrono::clock::duration minor_penalty,
+VirtualMemory::VirtualMemory(champsim::data::bytes page_table_page_size, std::size_t page_table_levels,
+                             champsim::chrono::clock::duration minor_penalty,
+                             champsim::chrono::clock::duration data_4kb_penalty,
+                             champsim::chrono::clock::duration data_2mb_penalty,
                              MEMORY_CONTROLLER& dram_)
-    : VirtualMemory(page_table_page_size, page_table_levels, minor_penalty, dram_, {})
+    : VirtualMemory(page_table_page_size, page_table_levels, minor_penalty, data_4kb_penalty, data_2mb_penalty, dram_, {})
 {
 }
 
@@ -115,9 +122,22 @@ std::pair<champsim::page_number, champsim::chrono::clock::duration> VirtualMemor
   if (fault) {
     ppage_pop();
     ErrorPageManager::get_instance().add_current_ppage(ppage->second); //Hamoci's Addition
+    // Add reverse mapping for error latency calculation
+    ppage_to_vpage_map[{cpu_num, ppage->second}] = champsim::page_number{vaddr};
   }
 
-  auto penalty = fault ? minor_fault_penalty : champsim::chrono::clock::duration::zero();
+  // Select penalty based on PAGE_SIZE (4KB vs 2MB)
+  auto penalty = champsim::chrono::clock::duration::zero();
+  if (fault) {
+    if (PAGE_SIZE == 4096) {
+      penalty = data_page_fault_4kb_penalty;  // 4KB page
+    } else if (PAGE_SIZE == 2097152) {
+      penalty = data_page_fault_2mb_penalty;  // 2MB page
+    } else {
+      // Fallback: use 4KB penalty for unknown page sizes
+      penalty = data_page_fault_4kb_penalty;
+    }
+  }
 
   /* Hamoci's Error Page Management Logic */
   // if (is_error_page(champsim::page_number{ppage->second})) {
@@ -178,6 +198,24 @@ std::pair<champsim::address, champsim::chrono::clock::duration> VirtualMemory::g
   return {paddr, penalty};
 }
 
+std::optional<champsim::address> VirtualMemory::get_pte_pa_if_present(uint32_t cpu_num, champsim::page_number vaddr, std::size_t level) const
+{
+  champsim::dynamic_extent pte_table_entry_extent{champsim::address::bits, shamt(level)};
+  auto key = std::make_tuple(cpu_num, static_cast<uint32_t>(level), champsim::address_slice{pte_table_entry_extent, vaddr});
+  auto ppage = page_table.find(key);
+
+  if (ppage == page_table.end()) {
+    return std::nullopt;
+  }
+
+  auto offset = get_offset(vaddr, level);
+  champsim::address paddr{
+      champsim::splice(ppage->second, champsim::address_slice{champsim::dynamic_extent{champsim::data::bits{champsim::lg2(pte_entry::byte_multiple)},
+                                                                                       static_cast<std::size_t>(champsim::lg2(pte_page_size.count()))},
+                                                              offset})};
+  return paddr;
+}
+
 /* Hamoci's Error Page Management Logic */
 // void VirtualMemory::init_error_page_penalty(void) {
 //   error_page_penalty = minor_fault_penalty * 4; // CPU Clock Period에 직접 접근하기 어려워, 간접적으로 사용
@@ -186,3 +224,12 @@ std::pair<champsim::address, champsim::chrono::clock::duration> VirtualMemory::g
 // void VirtualMemory::remove_error_page(champsim::page_number page) { error_pages.erase(page); }
 // bool VirtualMemory::is_error_page(champsim::page_number page) const { return error_pages.find(page) != error_pages.end(); }
 /* End of Hamoci's Error Page Management Logic */
+
+std::optional<champsim::page_number> VirtualMemory::get_vpage_for_ppage(uint32_t cpu_num, champsim::page_number paddr) const
+{
+  auto it = ppage_to_vpage_map.find({cpu_num, paddr});
+  if (it != ppage_to_vpage_map.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}

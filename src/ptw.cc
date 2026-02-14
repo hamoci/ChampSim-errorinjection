@@ -29,6 +29,12 @@
 #include "util/span.h"
 #include "vmem.h"
 
+namespace
+{
+// Focused PSC debug switch (independent from champsim::debug_print).
+constexpr bool debug_ptw_psc = false;
+}
+
 PageTableWalker::PageTableWalker(champsim::ptw_builder b)
     : champsim::operable(b.m_clock_period), upper_levels(b.m_uls), lower_level(b.m_ll), NAME(b.m_name),
       MSHR_SIZE(b.m_mshr_size.value_or(std::lround(b.m_mshr_factor * std::floor(std::size(upper_levels))))),
@@ -42,6 +48,7 @@ PageTableWalker::PageTableWalker(champsim::ptw_builder b)
 
   for (auto [level, sets, ways] : local_pscl_dims) {
     pscl.emplace_back(sets, ways, pscl_indexer{b.m_vmem->shamt(level)}, pscl_indexer{b.m_vmem->shamt(level)});
+    pscl_levels.push_back(level);
   }
 }
 
@@ -58,8 +65,25 @@ auto PageTableWalker::handle_read(const request_type& handle_pkt, channel_type* 
   pscl_entry walk_init = {handle_pkt.v_address, CR3_addr, std::size(pscl)};
   std::vector<std::optional<pscl_entry>> pscl_hits;
   std::transform(std::begin(pscl), std::end(pscl), std::back_inserter(pscl_hits), [walk_init](auto& x) { return x.check_hit(walk_init); });
+  if (debug_ptw_psc) {
+    bool any_hit = false;
+    for (std::size_t idx = 0; idx < pscl_hits.size(); ++idx) {
+      if (pscl_hits[idx].has_value()) {
+        any_hit = true;
+        auto abs_level = (idx < pscl_levels.size()) ? pscl_levels[idx] : pscl_hits[idx].value().level;
+        fmt::print("[PTW_PSC][{}] handle_read vaddr=0x{:x} hit pscl_idx={} abs_level={} internal_level={}\n", NAME,
+                   handle_pkt.v_address.to<uint64_t>(), idx, abs_level, pscl_hits[idx].value().level);
+      }
+    }
+    if (!any_hit) {
+      fmt::print("[PTW_PSC][{}] handle_read vaddr=0x{:x} miss (all PSC levels)\n", NAME, handle_pkt.v_address.to<uint64_t>());
+    }
+  }
   walk_init =
       std::accumulate(std::begin(pscl_hits), std::end(pscl_hits), std::optional<pscl_entry>(walk_init), [](auto x, auto& y) { return y.value_or(*x); }).value();
+  if (debug_ptw_psc) {
+    fmt::print("[PTW_PSC][{}] handle_read selected_internal_start_level={}\n", NAME, walk_init.level);
+  }
 
   champsim::address_slice walk_offset{
       champsim::dynamic_extent{champsim::data::bits{LOG2_PAGE_SIZE}, champsim::data::bits{champsim::lg2(pte_entry::byte_multiple)}},
@@ -91,6 +115,11 @@ auto PageTableWalker::handle_fill(const mshr_type& fill_mshr) -> std::optional<m
 
   const auto pscl_idx = std::size(pscl) - fill_mshr.translation_level;
   pscl.at(pscl_idx).fill({fill_mshr.v_address, *fill_mshr.data, fill_mshr.translation_level});
+  if (debug_ptw_psc) {
+    auto abs_level = (pscl_idx < pscl_levels.size()) ? pscl_levels[pscl_idx] : fill_mshr.translation_level;
+    fmt::print("[PTW_PSC][{}] fill vaddr=0x{:x} pscl_idx={} abs_level={} internal_level={}\n", NAME, fill_mshr.v_address.to<uint64_t>(), pscl_idx,
+               abs_level, fill_mshr.translation_level);
+  }
 
   mshr_type fwd_mshr = fill_mshr;
   fwd_mshr.address = *fill_mshr.data;
@@ -240,3 +269,46 @@ void PageTableWalker::print_deadlock()
   });
 }
 // LCOV_EXCL_STOP
+
+std::optional<std::size_t> PageTableWalker::get_psc_cached_level(champsim::address vaddr) const
+{
+  std::optional<std::size_t> lowest_level;
+
+  // Check each PSC level for this virtual address.
+  // Return absolute page-table level (e.g., 5/4/3/2), not PTW-internal relative level.
+  for (std::size_t idx = 0; idx < pscl.size(); ++idx) {
+    const auto& pscl_cache = pscl[idx];
+    // Create a dummy entry with the virtual address we're looking for
+    // The level field will be checked when we find a match
+    pscl_entry dummy_entry{vaddr, champsim::address{}, vmem->pt_levels};
+
+    // Use peek() for read-only check (doesn't update LRU state)
+    auto cached = pscl_cache.peek(dummy_entry);
+
+    if (cached.has_value()) {
+      // Found a match in this PSC level. Prefer the absolute level map.
+      std::size_t cached_level = cached.value().level;
+      if (idx < pscl_levels.size()) {
+        cached_level = pscl_levels[idx];
+      }
+
+      // Track the lowest (most specific) level found
+      if (!lowest_level.has_value() || cached_level < lowest_level.value()) {
+        lowest_level = cached_level;
+      }
+      if (debug_ptw_psc) {
+        fmt::print("[PTW_PSC][{}] query vaddr=0x{:x} hit pscl_idx={} abs_level={}\n", NAME, vaddr.to<uint64_t>(), idx, cached_level);
+      }
+    }
+  }
+
+  if (debug_ptw_psc) {
+    if (lowest_level.has_value()) {
+      fmt::print("[PTW_PSC][{}] query vaddr=0x{:x} return_start_level={}\n", NAME, vaddr.to<uint64_t>(), lowest_level.value());
+    } else {
+      fmt::print("[PTW_PSC][{}] query vaddr=0x{:x} miss\n", NAME, vaddr.to<uint64_t>());
+    }
+  }
+
+  return lowest_level;
+}

@@ -328,6 +328,10 @@ public:
   /* Hamoci Impl Start */
 public:
   long error_way_count = 0;
+
+  // Helper function for dynamic error latency calculation
+  // Returns true if the given address is present in this cache (read-only check)
+  [[nodiscard]] bool is_address_in_cache(champsim::address addr) const;
   static constexpr long MAX_ERROR_WAY = 8;
 
   // Error Way LRU tracking

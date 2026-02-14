@@ -185,10 +185,10 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
   auto& epm = ErrorPageManager::get_instance();
   bool debug_mode = false; //Hamoci: for Debug Print
   if (epm.is_cache_pinning_enabled() && is_error_data(fill_mshr.address) && NAME == "LLC") {
-    // Cache Pinning 활성화 + Error 데이터 + LLC → Error Way 사용
+    // Find Error Way
     auto [error_way, error_way_idx] = find_error_way(set_idx, set_begin, set_end);
 
-    // Debug output - show when find_error_way is called
+    // Debug output
     if(debug_mode){
       fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, Set: {}, Way: {}\n",
                fill_mshr.address.to<uint64_t>(), set_idx, error_way_idx);  
@@ -196,7 +196,7 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
     way = error_way;
     way_idx = error_way_idx;
   } else {
-    // Cache Pinning 비활성화 또는 일반 데이터 → 기존 방식 (Normal Way)
+    // Find Normal Way
     auto [normal_way, normal_way_idx] = find_normal_way(fill_mshr, set_idx, set_begin);
     way = normal_way;
     way_idx = normal_way_idx;
@@ -894,6 +894,18 @@ void CACHE::impl_replacement_cache_fill(uint32_t triggering_cpu, long set, long 
 
 void CACHE::impl_replacement_final_stats() const { repl_module_pimpl->impl_replacement_final_stats(); }
 
+bool CACHE::is_address_in_cache(champsim::address addr) const
+{
+  auto [set_begin, set_end] = get_set_span(addr);
+  auto target = addr.slice_upper(OFFSET_BITS);
+  for (auto it = set_begin; it != set_end; ++it) {
+    if (it->valid && it->address.slice_upper(OFFSET_BITS) == target) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void CACHE::initialize()
 {
   impl_prefetcher_initialize();
@@ -1103,7 +1115,7 @@ auto CACHE::find_error_way(long set_idx,
 
   long error_count = error_way_count;
 
-  // ========== Case 1: Error Way가 없음 → 첫 할당 ==========
+  // ========== Case 1: Error Way가 없음. 첫 할당 ==========
   if (error_count == 0) {
     long new_error_way = NUM_WAY - 1;  // Way 15 (마지막 Way)
     fmt::print("[{}] ALLOC_NEW: Set {} triggering Way {} allocation (count: 0→1)\n", NAME, set_idx, new_error_way);
@@ -1116,7 +1128,7 @@ auto CACHE::find_error_way(long set_idx,
     return {way, new_error_way};
   }
 
-  // ========== Case 2: Error Way 존재 → 빈 공간 찾기 ==========
+  // ========== Case 2: Error Way 할당 필요X, 빈 공간 찾기 ==========
   long error_start = get_error_way_start();
   long error_end = NUM_WAY;
 
@@ -1132,7 +1144,7 @@ auto CACHE::find_error_way(long set_idx,
     return {empty_way, way_idx};
   }
 
-  // ========== Case 3: 꽉 참 → 확장 가능? ==========
+  // ========== Case 3: 현재 할당된 Way 꽉참. 확장 가능? ==========
   if (can_expand_error_way()) {
     long new_error_way = error_start - 1;  // 예: 15 → 14 → 13...
     fmt::print("[{}] EXPAND: Set {} expanding to Way {} (count: {}→{})\n", NAME, set_idx, new_error_way, error_count, error_count + 1);
@@ -1162,6 +1174,9 @@ auto CACHE::find_normal_way(const mshr_type& fill_mshr, long set_idx,
 {
   // 일반 Way 범위 (전역)
   long normal_end = get_normal_way_end();
+  if (normal_end <= 0) {
+    return {set_begin, 0};
+  }
   auto normal_finish = std::next(set_begin, normal_end);
 
   // 빈 Way 찾기 (일반 Way만)
@@ -1274,7 +1289,8 @@ bool CACHE::can_expand_error_way() const
   if (!epm.is_cache_pinning_enabled()) {
     return false;  // Cache Pinning 비활성화 시 확장 불가
   }
-  return error_way_count < MAX_ERROR_WAY;
+  auto max_expandable_error_ways = std::min<long>(MAX_ERROR_WAY, static_cast<long>(NUM_WAY) - 1);
+  return error_way_count < max_expandable_error_ways;
 }
 
 void CACHE::print_error_way_stats() const

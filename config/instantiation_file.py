@@ -23,7 +23,7 @@ from . import util
 from . import cxx
 
 pmem_fmtstr = 'champsim::chrono::picoseconds{{{clock_period_dbus}}}, champsim::chrono::picoseconds{{{clock_period_mc}}}, std::size_t{{{_tRP}}}, std::size_t{{{_tRCD}}}, std::size_t{{{_tCAS}}}, std::size_t{{{_tRAS}}}, champsim::chrono::microseconds{{{_refresh_period}}}, {{{_ulptr}}}, {rq_size}, {wq_size}, {channels}, champsim::data::bytes{{{channel_width}}}, {_bank_rows}, {_bank_columns}, {ranks}, {bankgroups}, {banks}, {_refreshes_per_period}'
-vmem_fmtstr = 'champsim::data::bytes{{{pte_page_size}}}, {num_levels}, champsim::chrono::picoseconds{{{clock_period}*{minor_fault_penalty}}}, {dram_name}, {_randomization}'
+vmem_fmtstr = 'champsim::data::bytes{{{pte_page_size}}}, {num_levels}, champsim::chrono::picoseconds{{{clock_period}*{minor_fault_penalty}}}, champsim::chrono::picoseconds{{{clock_period}*{data_page_fault_4kb}}}, champsim::chrono::picoseconds{{{clock_period}*{data_page_fault_2mb}}}, {dram_name}, {_randomization}'
 
 queue_fmtstr = '{rq_size}, {pq_size}, {wq_size}, champsim::data::bits{{{_offset_bits}}}, {_queue_check_full_addr:b}'
 
@@ -407,6 +407,9 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
     if 'error_latency_penalty' in error_page_manager:
         yield f'  epm.set_error_latency(champsim::chrono::picoseconds{{{error_page_manager["error_latency_penalty"] * global_clock_period}}});'
 
+    if 'pte_error_latency_penalty' in error_page_manager:
+        yield f'  epm.set_pte_error_latency(champsim::chrono::picoseconds{{{error_page_manager["pte_error_latency_penalty"] * global_clock_period}}});'
+
     if 'bit_error_rate' in error_page_manager:
         yield f'  epm.set_bit_error_rate({error_page_manager["bit_error_rate"]});'
 
@@ -425,6 +428,23 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         yield '  epm.set_cache_pinning_enabled(true);'
     else:
         yield '  epm.set_cache_pinning_enabled(false);'
+
+    # Dynamic error latency configuration
+    if error_page_manager.get('dynamic_error_latency', True):
+        yield '  epm.set_dynamic_error_latency_enabled(true);'
+    else:
+        yield '  epm.set_dynamic_error_latency_enabled(false);'
+
+    # Set DRAM references for dynamic error latency calculation
+    yield ''
+    yield '  // Set DRAM references for dynamic error latency calculation'
+    yield '  std::vector<PageTableWalker*> ptw_ptrs;'
+    yield '  for (auto& ptw : ptws) { ptw_ptrs.push_back(&ptw); }'
+    yield '  std::vector<CACHE*> cache_ptrs;'
+    yield '  for (auto& cache : caches) { cache_ptrs.push_back(&cache); }'
+    yield '  DRAM.set_vmem(&vmem);'
+    yield '  DRAM.set_ptws(ptw_ptrs);'
+    yield '  DRAM.set_caches(cache_ptrs);'
     yield '}'
     yield ''
 

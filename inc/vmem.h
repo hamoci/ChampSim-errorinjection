@@ -40,12 +40,15 @@ class VirtualMemory
 
 private:
   std::map<std::pair<uint32_t, champsim::page_number>, champsim::page_number> vpage_to_ppage_map;
+  std::map<std::pair<uint32_t, champsim::page_number>, champsim::page_number> ppage_to_vpage_map; // Reverse mapping for error latency calculation
   std::map<std::tuple<uint32_t, uint32_t, champsim::address_slice<champsim::dynamic_extent>>, champsim::address> page_table;
   std::optional<uint64_t> randomization_seed;
   MEMORY_CONTROLLER& dram;
 
 public:
-  const champsim::chrono::clock::duration minor_fault_penalty;
+  const champsim::chrono::clock::duration minor_fault_penalty;  // PTE allocation (always 4KB)
+  const champsim::chrono::clock::duration data_page_fault_4kb_penalty;  // Data page allocation (4KB)
+  const champsim::chrono::clock::duration data_page_fault_2mb_penalty;  // Data page allocation (2MB)
   const std::size_t pt_levels;
   const pte_entry pte_page_size; // Size of a PTE page
 
@@ -70,14 +73,22 @@ public:
    *
    * :param page_table_page_size: The size of one page table page. This value must be less than the size of a physical page.
    * :param page_table_levels: The number of levels in the virtual memory table hierarchy.
-   * :param minor_penalty: The latency of a minor page fault.
+   * :param minor_penalty: The latency of a PTE allocation (always 4KB).
+   * :param data_4kb_penalty: The latency of a 4KB data page allocation.
+   * :param data_2mb_penalty: The latency of a 2MB data page allocation.
    * :param dram: The physical memory of the system.
    *   This is currently only used to issue a warning if the physical memory is smaller than the virtual memory.
    *   Future versions may perform major page faults through this reference.
    */
-  VirtualMemory(champsim::data::bytes page_table_page_size, std::size_t page_table_levels, champsim::chrono::clock::duration minor_penalty,
+  VirtualMemory(champsim::data::bytes page_table_page_size, std::size_t page_table_levels,
+                champsim::chrono::clock::duration minor_penalty,
+                champsim::chrono::clock::duration data_4kb_penalty,
+                champsim::chrono::clock::duration data_2mb_penalty,
                 MEMORY_CONTROLLER& dram_);
-  VirtualMemory(champsim::data::bytes page_table_page_size, std::size_t page_table_levels, champsim::chrono::clock::duration minor_penalty,
+  VirtualMemory(champsim::data::bytes page_table_page_size, std::size_t page_table_levels,
+                champsim::chrono::clock::duration minor_penalty,
+                champsim::chrono::clock::duration data_4kb_penalty,
+                champsim::chrono::clock::duration data_2mb_penalty,
                 MEMORY_CONTROLLER& dram_, std::optional<uint64_t> randomization_seed_);
 
   /**
@@ -123,6 +134,23 @@ public:
    * :returns: A pair of the page table page address and the latency to be applied to the operation.
    */
   std::pair<champsim::address, champsim::chrono::clock::duration> get_pte_pa(uint32_t cpu_num, champsim::page_number vaddr, std::size_t level);
+  /**
+   * Find the address for the page table page for the given virtual address and level
+   * without allocating new page table state.
+   *
+   * :returns: The PTE physical address if already present, otherwise std::nullopt.
+   */
+  [[nodiscard]] std::optional<champsim::address> get_pte_pa_if_present(uint32_t cpu_num, champsim::page_number vaddr, std::size_t level) const;
+
+  /**
+   * Get the virtual page number for a given physical page number (reverse lookup).
+   *
+   * :param cpu_num: The cpu index of the core making the request.
+   * :param paddr: The physical page number to look up.
+   *
+   * :returns: An optional containing the virtual page number if found, otherwise empty.
+   */
+  std::optional<champsim::page_number> get_vpage_for_ppage(uint32_t cpu_num, champsim::page_number paddr) const;
 };
 
 #endif
