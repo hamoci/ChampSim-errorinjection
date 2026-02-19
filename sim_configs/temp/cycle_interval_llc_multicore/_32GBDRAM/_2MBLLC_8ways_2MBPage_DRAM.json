@@ -1,9 +1,9 @@
 {
-  "executable_name": "champsim_4kb_32gb",
+  "executable_name": "champsim_2mb_8ways_2mb_32gb_4cores",
   "block_size": 64,
-  "page_size": 4096,
+  "page_size": 2097152,
   "heartbeat_frequency": 10000000,
-  "num_cores": 1,
+  "num_cores": 4,
   "ooo_cpu": [
     {
       "frequency": 4000,
@@ -118,7 +118,7 @@
     "prefetch_as_load": false
   },
   "PTW": {
-    "lower_level": "cpu0_L1D",
+    "lower_level": "DRAM",
     "pscl5_set": 1,
     "pscl5_way": 2,
     "pscl4_set": 1,
@@ -134,8 +134,8 @@
   },
   "LLC": {
     "frequency": 4000,
-    "sets": 2048,
-    "ways": 16,
+    "sets": 8192,
+    "ways": 8,
     "rq_size": 32,
     "wq_size": 32,
     "pq_size": 32,
@@ -160,24 +160,20 @@
     "channel_width": 4,
     "wq_size": 64,
     "rq_size": 64,
-    "tCAS": 40,
-    "tRCD": 40,
-    "tRP": 40,
-    "tRAS": 76,
+    "tCAS": 16.6,
+    "tRCD": 16.6,
+    "tRP": 16.6,
+    "tRAS": 32,
     "refresh_period": 32,
     "refreshes_per_period": 8192
   },
   "virtual_memory": {
     "pte_page_size": 4096,
-    "num_levels": 5,
-    "minor_fault_penalty": 3956,
-    "randomization": 1,
-    "data_page_fault_4kb": 3956,
-    "data_page_fault_2mb": 109201
+    "num_levels": 4,
+    "minor_fault_penalty": 4239,
+    "randomization": 1
   },
   "error_page_manager": {
-    "mode": "OFF",
-    "cache_pinning": false,
-    "dynamic_error_latency": false
+    "mode": "OFF"
   }
 }

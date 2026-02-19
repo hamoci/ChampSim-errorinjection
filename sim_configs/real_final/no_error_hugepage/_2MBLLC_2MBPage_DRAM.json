@@ -118,9 +118,7 @@
     "prefetch_as_load": false
   },
   "PTW": {
-    "lower_level": "DRAM",
-    "pscl5_set": 1,
-    "pscl5_way": 2,
+    "lower_level": "cpu0_L1D",
     "pscl4_set": 1,
     "pscl4_way": 4,
     "pscl3_set": 2,
@@ -176,6 +174,8 @@
     "data_page_fault_2mb": 109201
   },
   "error_page_manager": {
-    "mode": "OFF"
+    "mode": "OFF",
+    "cache_pinning": false,
+    "dynamic_error_latency": false
   }
 }
