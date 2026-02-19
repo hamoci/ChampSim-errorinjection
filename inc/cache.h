@@ -332,7 +332,7 @@ public:
   // Helper function for dynamic error latency calculation
   // Returns true if the given address is present in this cache (read-only check)
   [[nodiscard]] bool is_address_in_cache(champsim::address addr) const;
-  static constexpr long MAX_ERROR_WAY = 8;
+  long get_max_error_way_limit() const;
 
   // Error Way LRU tracking
   std::vector<uint64_t> error_way_last_used_cycles;

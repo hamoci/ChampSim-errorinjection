@@ -1,0 +1,3 @@
+# LLC 2MB 8 Ways에 대한 실험만 있는 이유
+* LLC Pinning이 최대 LLC의 절반(8way)까지 된다고 가정하였을 때 LLC의 절반을 전혀 사용하지 못하는 상황을 실험하기 위함
+* 즉, LLC Pinning 성능 저하의 상한을 실험

@@ -435,6 +435,10 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
     else:
         yield '  epm.set_dynamic_error_latency_enabled(false);'
 
+    # Cache pinning max ways per set
+    if 'max_error_ways_per_set' in error_page_manager:
+        yield f'  epm.set_max_error_ways_per_set({error_page_manager["max_error_ways_per_set"]});'
+
     # Set DRAM references for dynamic error latency calculation
     yield ''
     yield '  // Set DRAM references for dynamic error latency calculation'

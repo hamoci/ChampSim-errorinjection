@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <random>
 #include <memory>
+#include <algorithm>
 #include "address.h"
 #include "chrono.h"
 #include "champsim.h"
@@ -57,6 +58,7 @@ private:
 private:
     bool cache_pinning_enabled{false};  // Enable/disable cache pinning feature
     bool dynamic_error_latency_enabled{true};  // true: emulate PTW(PSC+cache), false: fixed error_latency_penalty
+    uint32_t max_error_ways_per_set{8};  // Maximum number of pinned/error ways per LLC set
 
 
 // Error Statistics
@@ -137,6 +139,10 @@ public:
     // Dynamic/Fixed error latency mode setter/getter
     void set_dynamic_error_latency_enabled(bool enabled) { dynamic_error_latency_enabled = enabled; }
     bool is_dynamic_error_latency_enabled() const { return dynamic_error_latency_enabled; }
+
+    // Cache pinning capacity setter/getter
+    void set_max_error_ways_per_set(uint32_t ways) { max_error_ways_per_set = std::max<uint32_t>(1, ways); }
+    uint32_t get_max_error_ways_per_set() const { return max_error_ways_per_set; }
 
     // Update cycle error counter (called from operate() every cycle)
     void update_cycle_errors(champsim::chrono::clock::time_point current_time) {

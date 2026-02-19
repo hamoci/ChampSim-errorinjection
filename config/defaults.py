@@ -100,5 +100,6 @@ def error_page_manager_defaults():
         'errors_per_interval': 1,
         'error_cycle_interval': 0,
         'cache_pinning': False,
-        'dynamic_error_latency': True
+        'dynamic_error_latency': True,
+        'max_error_ways_per_set': 8
     }

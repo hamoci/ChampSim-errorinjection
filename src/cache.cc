@@ -253,7 +253,7 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
   if (epm.is_cache_pinning_enabled() && NAME == "LLC" && is_error_data(fill_mshr.address) && way_idx >= get_error_way_start() && way_idx < NUM_WAY) {
     // Error Way에 데이터를 채웠으므로 타임스탬프 업데이트
     long error_way_offset = way_idx - get_error_way_start();
-    std::size_t idx = static_cast<std::size_t>(set_idx * MAX_ERROR_WAY + error_way_offset);
+    std::size_t idx = static_cast<std::size_t>(set_idx * get_max_error_way_limit() + error_way_offset);
     if (idx < error_way_last_used_cycles.size()) {
       error_way_last_used_cycles[idx] = error_way_cycle++;
     }
@@ -338,7 +338,7 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
         // Error Way Hit → 타임스탬프 업데이트
         long set_idx = get_set_index(handle_pkt.address);
         long error_way_offset = way_idx - error_way_start;
-        std::size_t idx = static_cast<std::size_t>(set_idx * MAX_ERROR_WAY + error_way_offset);
+        std::size_t idx = static_cast<std::size_t>(set_idx * get_max_error_way_limit() + error_way_offset);
         if (idx < error_way_last_used_cycles.size()) {
           error_way_last_used_cycles[idx] = error_way_cycle++;
         }
@@ -1014,8 +1014,9 @@ bool CACHE::allocate_error_way(long way_idx)
     fmt::print("[{}] Starting to allocate Way {} as Error Way across all {} sets\n", NAME, way_idx, NUM_SET);
   }
 
-  if (error_way_count >= MAX_ERROR_WAY) {
-    fmt::print("[{}] Cannot allocate Way {} as Error Way because maximum number of Error Ways ({}) have already been allocated\n", NAME, way_idx, MAX_ERROR_WAY);
+  const auto max_error_way_limit = get_max_error_way_limit();
+  if (error_way_count >= max_error_way_limit) {
+    fmt::print("[{}] Cannot allocate Way {} as Error Way because maximum number of Error Ways ({}) have already been allocated\n", NAME, way_idx, max_error_way_limit);
     return false;
   }
 
@@ -1041,7 +1042,7 @@ bool CACHE::allocate_error_way(long way_idx)
 
   // 각 Set마다 Error Way들의 last_used_cycles를 추적
   if (error_way_last_used_cycles.empty()) {
-    error_way_last_used_cycles.resize(static_cast<std::size_t>(NUM_SET * MAX_ERROR_WAY), 0);
+    error_way_last_used_cycles.resize(static_cast<std::size_t>(NUM_SET * max_error_way_limit), 0);
   }
 
   return true;
@@ -1225,14 +1226,14 @@ long CACHE::find_error_victim(long set_idx,
 
   // 모두 valid면 LRU 방식으로 victim 선택
   // error_way_last_used_cycles에서 가장 오래된 Way 찾기
-  // 인덱싱: set_idx * MAX_ERROR_WAY + (way - error_start)
+  // 인덱싱: set_idx * max_error_way_limit + (way - error_start)
 
   long victim_way = error_start;
   uint64_t min_cycle = UINT64_MAX;
 
   for (long way = error_start; way < NUM_WAY; ++way) {
     long error_way_offset = way - error_start;
-    std::size_t idx = static_cast<std::size_t>(set_idx * MAX_ERROR_WAY + error_way_offset);
+    std::size_t idx = static_cast<std::size_t>(set_idx * get_max_error_way_limit() + error_way_offset);
 
     if (idx < error_way_last_used_cycles.size()) {
       uint64_t last_used = error_way_last_used_cycles[idx];
@@ -1289,8 +1290,16 @@ bool CACHE::can_expand_error_way() const
   if (!epm.is_cache_pinning_enabled()) {
     return false;  // Cache Pinning 비활성화 시 확장 불가
   }
-  auto max_expandable_error_ways = std::min<long>(MAX_ERROR_WAY, static_cast<long>(NUM_WAY) - 1);
+  auto max_expandable_error_ways = get_max_error_way_limit();
   return error_way_count < max_expandable_error_ways;
+}
+
+long CACHE::get_max_error_way_limit() const
+{
+  auto& epm = ErrorPageManager::get_instance();
+  long configured = static_cast<long>(epm.get_max_error_ways_per_set());
+  configured = std::max<long>(1, configured);
+  return std::min<long>(configured, static_cast<long>(NUM_WAY) - 1);
 }
 
 void CACHE::print_error_way_stats() const
