@@ -36,7 +36,7 @@ namespace
 {
 // Local debug switch for focused dynamic error-latency traces.
 // Toggle this directly in code without enabling global champsim::debug_print.
-constexpr bool debug_dynamic_error_latency = false;
+constexpr bool debug_dynamic_error_latency = true;
 
 uint64_t to_cpu_cycles(champsim::chrono::clock::duration latency)
 {
@@ -383,90 +383,58 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       // Hamoci's Error Check - Apply error latency based on mode
       auto error_latency = champsim::chrono::clock::duration{};
 
-      // RANDOM mode: BER-based error check
-      if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::RANDOM &&
-          ErrorPageManager::get_instance().check_page_error()) {
-        // Select latency based on access type and dynamic/fixed mode
-        if (ErrorPageManager::get_instance().is_dynamic_error_latency_enabled()) {
-          std::optional<champsim::address> vaddr_hint = std::nullopt;
-          if (pkt->value().type == access_type::TRANSLATION) {
-            vaddr_hint = pkt->value().v_address;
-          }
-          error_latency = calculate_dynamic_error_latency(pkt->value().cpu, pkt->value().address, vaddr_hint);
-          if (debug_dynamic_error_latency) {
-            fmt::print("[ERR_LAT][RANDOM][DYNAMIC] type={} addr=0x{:x} cpu={} latency={} cycles\n",
-                       access_type_names.at(champsim::to_underlying(pkt->value().type)),
-                       pkt->value().address.to<uint64_t>(), pkt->value().cpu, to_cpu_cycles(error_latency));
-          }
-        } else if (pkt->value().type == access_type::TRANSLATION) {
-          error_latency = ErrorPageManager::get_instance().get_pte_error_latency();
-        } else {
-          error_latency = ErrorPageManager::get_instance().get_error_latency();
-          if (debug_dynamic_error_latency) {
-            fmt::print("[ERR_LAT][RANDOM][FIXED] type={} addr=0x{:x} cpu={} latency={} cycles\n",
-                       access_type_names.at(champsim::to_underlying(pkt->value().type)),
-                       pkt->value().address.to<uint64_t>(), pkt->value().cpu, to_cpu_cycles(error_latency));
-          }
-        }
-        ErrorPageManager::get_instance().record_error_access();
-        //for debug
-        //fmt::print("[DRAM_BER_ERROR] Page error occurred! address={} page_error_rate={:.2e} additional_latency={} cycles, dram access ={}\n",
-        //           pkt->value().address, ErrorPageManager::get_instance().get_page_error_rate(),
-        //           error_latency.count(), dram_access_count);
-      }
-      // CYCLE mode: Consume error from counter
-      else if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE &&
+      // CYCLE mode: Consume error from counter - Dual-Layer Recording (EPT)
+      if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE &&
                ErrorPageManager::get_instance().consume_cycle_error()) {
-        // 64B 정렬된 주소 (캐시 라인 단위)
-        auto aligned_addr = champsim::address{pkt->value().address.to<uint64_t>() >> 6};
+        auto& epm = ErrorPageManager::get_instance();
+        uint64_t raw_pa = pkt->value().address.to<uint64_t>();
 
-        bool already_registered = false;
+        // Record error through EPT dual-layer system
+        ErrorRecordResult result = epm.record_error(raw_pa);
 
-        // Cache Pinning 활성화 시에만 중복 체크
-        if (ErrorPageManager::get_instance().is_cache_pinning_enabled()) {
-          // 이미 등록된 캐시 라인인지 체크
-          already_registered = ErrorPageManager::get_instance().is_error_address(aligned_addr);
-          // 64B 정렬된 주소로 등록
-          ErrorPageManager::get_instance().add_error_address(aligned_addr);
-        }
-
-        // Cache Pinning 비활성화 또는 새로운 캐시 라인일 때 latency 부여
-        if (!already_registered) {
-          // Select latency based on access type and dynamic/fixed mode
-          if (ErrorPageManager::get_instance().is_dynamic_error_latency_enabled()) {
-            std::optional<champsim::address> vaddr_hint = std::nullopt;
-            if (pkt->value().type == access_type::TRANSLATION) {
-              vaddr_hint = pkt->value().v_address;
+        switch (result) {
+          case ErrorRecordResult::FIRST_ERROR:
+          case ErrorRecordResult::ADDED_ERROR:
+            // New error position: apply recording latency (PTW cost)
+            if (epm.is_dynamic_error_latency_enabled()) {
+              std::optional<champsim::address> vaddr_hint = std::nullopt;
+              if (pkt->value().type == access_type::TRANSLATION) {
+                vaddr_hint = pkt->value().v_address;
+              }
+              error_latency = calculate_dynamic_error_latency(pkt->value().cpu, pkt->value().address, vaddr_hint);
+              if (debug_dynamic_error_latency) {
+                fmt::print("[ERR_LAT][CYCLE][DYNAMIC][{}] type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                           (result == ErrorRecordResult::FIRST_ERROR ? "FIRST" : "ADDED"),
+                           access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                           raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
+              }
+            } else if (pkt->value().type == access_type::TRANSLATION) {
+              error_latency = epm.get_pte_error_latency();
+            } else {
+              error_latency = epm.get_error_latency();
+              if (debug_dynamic_error_latency) {
+                fmt::print("[ERR_LAT][CYCLE][FIXED][{}] type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                           (result == ErrorRecordResult::FIRST_ERROR ? "FIRST" : "ADDED"),
+                           access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                           raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
+              }
             }
-            error_latency = calculate_dynamic_error_latency(pkt->value().cpu, pkt->value().address, vaddr_hint);
+            break;
+
+          case ErrorRecordResult::ALREADY_KNOWN:
+            // Already registered error position: no additional latency
+            break;
+
+          case ErrorRecordResult::PAGE_RETIRED:
+            // Page retirement: apply large retirement latency
+            error_latency = epm.get_retirement_latency();
             if (debug_dynamic_error_latency) {
-              fmt::print("[ERR_LAT][CYCLE][DYNAMIC] type={} addr=0x{:x} cpu={} latency={} cycles\n",
-                         access_type_names.at(champsim::to_underlying(pkt->value().type)),
-                         pkt->value().address.to<uint64_t>(), pkt->value().cpu, to_cpu_cycles(error_latency));
+              fmt::print("[ERR_LAT][CYCLE][RETIRED] addr=0x{:x} cpu={} latency={} cycles\n",
+                         raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
             }
-          } else if (pkt->value().type == access_type::TRANSLATION) {
-            error_latency = ErrorPageManager::get_instance().get_pte_error_latency();
-          } else {
-            error_latency = ErrorPageManager::get_instance().get_error_latency();
-            if (debug_dynamic_error_latency) {
-              fmt::print("[ERR_LAT][CYCLE][FIXED] type={} addr=0x{:x} cpu={} latency={} cycles\n",
-                         access_type_names.at(champsim::to_underlying(pkt->value().type)),
-                         pkt->value().address.to<uint64_t>(), pkt->value().cpu, to_cpu_cycles(error_latency));
-            }
-          }
+            break;
         }
-        ErrorPageManager::get_instance().record_error_access();
-
-        // Debug output - show when error occurs
-        bool debug_mode = false; //hamoci: revise this for debug print
-        if(debug_mode) {
-          fmt::print("[ERROR_OCCUR] Address: 0x{:x} Aligned: 0x{:x} (Total Errors: {}) {} (PinnedLines: {})\n",
-                    pkt->value().address.to<uint64_t>(),
-                    aligned_addr.to<uint64_t>(),
-                    ErrorPageManager::get_instance().get_total_error_count(),
-                    already_registered ? "(already registered)" : "(new)",
-                    ErrorPageManager::get_instance().get_error_address_count());
-        }
+        epm.record_error_access();
       }
 
       // this bank is now busy

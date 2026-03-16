@@ -1,7 +1,7 @@
 {
-  "executable_name": "champsim_2mb",
+  "executable_name": "champsim_4kb_error_32gb_1e-8_psc_thrash_test",
   "block_size": 64,
-  "page_size": 2097152,
+  "page_size": 4096,
   "heartbeat_frequency": 10000000,
   "num_cores": 1,
 
@@ -127,14 +127,15 @@
   },
 
   "PTW": {
+    "lower_level": "cpu0_L1D",
     "pscl5_set": 1,
-    "pscl5_way": 2,
+    "pscl5_way": 1,
     "pscl4_set": 1,
-    "pscl4_way": 4,
-    "pscl3_set": 2,
-    "pscl3_way": 4,
-    "pscl2_set": 4,
-    "pscl2_way": 8,
+    "pscl4_way": 1,
+    "pscl3_set": 1,
+    "pscl3_way": 1,
+    "pscl2_set": 1,
+    "pscl2_way": 1,
     "rq_size": 16,
     "mshr_size": 5,
     "max_read": 2,
@@ -166,22 +167,33 @@
     "bankgroups": 8,
     "banks": 4,
     "bank_rows": 65536,
-    "bank_columns": 1024,
-    "channel_width": 8,
+    "bank_columns": 2048,
+    "channel_width": 4,
     "wq_size": 64,
     "rq_size": 64,
-    "tCAS": 16.6,
-    "tRCD": 16.6,
-    "tRP": 16.6,
-    "tRAS": 32,
+    "tCAS": 40,
+    "tRCD": 40,
+    "tRP": 40,
+    "tRAS": 76,
     "refresh_period": 32,
     "refreshes_per_period": 8192
   },
 
   "virtual_memory": {
     "pte_page_size": 4096,
-    "num_levels": 4,
-    "minor_fault_penalty": 4239,
+    "num_levels": 5,
+    "minor_fault_penalty": 3956,
+    "data_page_fault_4kb": 3956,
+    "data_page_fault_2mb": 109201,
     "randomization": 1
+  },
+
+  "error_page_manager": {
+    "mode": "CYCLE",
+    "error_latency_penalty": 1000,
+    "pte_error_latency_penalty": 800,
+    "error_cycle_interval": 144000,
+    "cache_pinning": true,
+    "dynamic_error_latency": true
   }
 }

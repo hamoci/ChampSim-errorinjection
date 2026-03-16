@@ -439,6 +439,10 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
     if 'max_error_ways_per_set' in error_page_manager:
         yield f'  epm.set_max_error_ways_per_set({error_page_manager["max_error_ways_per_set"]});'
 
+    # Page retirement latency (cycles, converted to picoseconds)
+    if 'retirement_latency' in error_page_manager:
+        yield f'  epm.set_retirement_latency(champsim::chrono::picoseconds{{{error_page_manager["retirement_latency"] * global_clock_period}}});'
+
     # Set DRAM references for dynamic error latency calculation
     yield ''
     yield '  // Set DRAM references for dynamic error latency calculation'

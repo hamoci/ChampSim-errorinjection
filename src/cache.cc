@@ -1252,9 +1252,8 @@ long CACHE::find_error_victim(long set_idx,
 bool CACHE::is_error_data(champsim::address addr) const
 {
   auto& epm = ErrorPageManager::get_instance();
-  // 64B 정렬된 주소로 체크 (캐시 라인 단위)
-  auto aligned_addr = champsim::address{addr.to<uint64_t>() >> 6};
-  return epm.is_error_address(aligned_addr);
+  // EPT dual-layer: check inline descriptor + EPT + retired page
+  return epm.is_error_position(addr.to<uint64_t>());
 }
 
 long CACHE::get_normal_way_end() const
@@ -1340,8 +1339,11 @@ void CACHE::print_error_way_stats() const
              total_error_way_slots, NUM_SET, error_way_count);
   fmt::print("  Used Error Way Slots: {} ({:.2f}%)\n", 
              used_error_way_slots, usage_percentage);
-  fmt::print("  Unused Error Way Slots: {} ({:.2f}%)\n", 
+  fmt::print("  Unused Error Way Slots: {} ({:.2f}%)\n",
              unused_error_way_slots, 100.0 - usage_percentage);
+
+  // Print EPT statistics
+  epm.print_ept_stats();
 }
 
 /* Hamoci Impl End */
