@@ -36,7 +36,8 @@ namespace
 {
 // Local debug switch for focused dynamic error-latency traces.
 // Toggle this directly in code without enabling global champsim::debug_print.
-constexpr bool debug_dynamic_error_latency = true;
+// debug_dynamic_error_latency is now controlled by ErrorPageManager::debug via JSON config ("debug": 0/1)
+#define debug_dynamic_error_latency (ErrorPageManager::get_instance().get_debug() == 1)
 
 uint64_t to_cpu_cycles(champsim::chrono::clock::duration latency)
 {
@@ -383,56 +384,74 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       // Hamoci's Error Check - Apply error latency based on mode
       auto error_latency = champsim::chrono::clock::duration{};
 
-      // CYCLE mode: Consume error from counter - Dual-Layer Recording (EPT)
+      // CYCLE mode: Consume error from counter
       if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE &&
                ErrorPageManager::get_instance().consume_cycle_error()) {
         auto& epm = ErrorPageManager::get_instance();
         uint64_t raw_pa = pkt->value().address.to<uint64_t>();
 
-        // Record error through EPT dual-layer system
-        ErrorRecordResult result = epm.record_error(raw_pa);
+        if (epm.is_cache_pinning_enabled()) {
+          // LLC Pinning ON: Dual-Layer Recording (PERT) + dynamic/fixed latency per case
+          ErrorRecordResult result = epm.record_error(raw_pa);
 
-        switch (result) {
-          case ErrorRecordResult::FIRST_ERROR:
-          case ErrorRecordResult::ADDED_ERROR:
-            // New error position: apply recording latency (PTW cost)
-            if (epm.is_dynamic_error_latency_enabled()) {
-              std::optional<champsim::address> vaddr_hint = std::nullopt;
-              if (pkt->value().type == access_type::TRANSLATION) {
-                vaddr_hint = pkt->value().v_address;
+          switch (result) {
+            case ErrorRecordResult::FIRST_ERROR:
+            case ErrorRecordResult::ADDED_ERROR:
+              // New error position: apply recording latency (PTW cost)
+              if (epm.is_dynamic_error_latency_enabled()) {
+                std::optional<champsim::address> vaddr_hint = std::nullopt;
+                if (pkt->value().type == access_type::TRANSLATION) {
+                  vaddr_hint = pkt->value().v_address;
+                }
+                error_latency = calculate_dynamic_error_latency(pkt->value().cpu, pkt->value().address, vaddr_hint);
+                if (debug_dynamic_error_latency) {
+                  fmt::print("[ERR_LAT][CYCLE][DYNAMIC][{}] type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                             (result == ErrorRecordResult::FIRST_ERROR ? "FIRST" : "ADDED"),
+                             access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                             raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
+                }
+              } else if (pkt->value().type == access_type::TRANSLATION) {
+                error_latency = epm.get_pte_error_latency();
+              } else {
+                error_latency = epm.get_error_latency();
+                if (debug_dynamic_error_latency) {
+                  fmt::print("[ERR_LAT][CYCLE][FIXED][{}] type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                             (result == ErrorRecordResult::FIRST_ERROR ? "FIRST" : "ADDED"),
+                             access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                             raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
+                }
               }
-              error_latency = calculate_dynamic_error_latency(pkt->value().cpu, pkt->value().address, vaddr_hint);
+              break;
+
+            case ErrorRecordResult::ALREADY_KNOWN:
+              // Already registered error position: no additional latency
+              break;
+
+            case ErrorRecordResult::PAGE_RETIRED:
+              // Page retirement: apply large retirement latency
+              error_latency = epm.get_error_latency();
               if (debug_dynamic_error_latency) {
-                fmt::print("[ERR_LAT][CYCLE][DYNAMIC][{}] type={} addr=0x{:x} cpu={} latency={} cycles\n",
-                           (result == ErrorRecordResult::FIRST_ERROR ? "FIRST" : "ADDED"),
-                           access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                fmt::print("[ERR_LAT][CYCLE][RETIRED] addr=0x{:x} cpu={} latency={} cycles\n",
                            raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
               }
-            } else if (pkt->value().type == access_type::TRANSLATION) {
+              break;
+          }
+        } else {
+          // LLC Pinning OFF: count errors per page, apply latency only on retirement
+          bool retired = epm.record_baseline_error(raw_pa);
+          if (retired) {
+            if (pkt->value().type == access_type::TRANSLATION) {
               error_latency = epm.get_pte_error_latency();
             } else {
               error_latency = epm.get_error_latency();
-              if (debug_dynamic_error_latency) {
-                fmt::print("[ERR_LAT][CYCLE][FIXED][{}] type={} addr=0x{:x} cpu={} latency={} cycles\n",
-                           (result == ErrorRecordResult::FIRST_ERROR ? "FIRST" : "ADDED"),
-                           access_type_names.at(champsim::to_underlying(pkt->value().type)),
-                           raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
-              }
             }
-            break;
-
-          case ErrorRecordResult::ALREADY_KNOWN:
-            // Already registered error position: no additional latency
-            break;
-
-          case ErrorRecordResult::PAGE_RETIRED:
-            // Page retirement: apply large retirement latency
-            error_latency = epm.get_retirement_latency();
-            if (debug_dynamic_error_latency) {
-              fmt::print("[ERR_LAT][CYCLE][RETIRED] addr=0x{:x} cpu={} latency={} cycles\n",
-                         raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
-            }
-            break;
+          }
+          if (debug_dynamic_error_latency) {
+            fmt::print("[ERR_LAT][CYCLE][NO_PINNING]{} type={} addr=0x{:x} cpu={} latency={} cycles\n",
+                       retired ? "[RETIRED]" : "",
+                       access_type_names.at(champsim::to_underlying(pkt->value().type)),
+                       raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
+          }
         }
         epm.record_error_access();
       }
@@ -576,6 +595,10 @@ void MEMORY_CONTROLLER::end_phase(unsigned cpu)
     fmt::print("OFF\n");
   }
   fmt::print("Total Error Accesses: {}\n", error_manager.get_total_error_count());
+  if (!error_manager.is_cache_pinning_enabled()) {
+    fmt::print("Baseline Retirement Threshold: {}\n", error_manager.get_baseline_retirement_threshold());
+    fmt::print("Baseline Page Retirements: {}\n", error_manager.get_stat_baseline_retirement_count());
+  }
   fmt::print("==============================\n");
 }
 

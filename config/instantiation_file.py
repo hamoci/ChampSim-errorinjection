@@ -439,9 +439,19 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
     if 'max_error_ways_per_set' in error_page_manager:
         yield f'  epm.set_max_error_ways_per_set({error_page_manager["max_error_ways_per_set"]});'
 
-    # Page retirement latency (cycles, converted to picoseconds)
-    if 'retirement_latency' in error_page_manager:
-        yield f'  epm.set_retirement_latency(champsim::chrono::picoseconds{{{error_page_manager["retirement_latency"] * global_clock_period}}});'
+    # ETT (Error Tracking Table) configuration
+    if 'ett_entries' in error_page_manager:
+        yield f'  epm.set_ett_num_entries({error_page_manager["ett_entries"]});'
+    if 'bloom_filter_size' in error_page_manager:
+        yield f'  epm.set_bloom_filter_size({error_page_manager["bloom_filter_size"]});'
+    if 'bloom_filter_k' in error_page_manager:
+        yield f'  epm.set_bloom_filter_k({error_page_manager["bloom_filter_k"]});'
+    if 'retirement_threshold' in error_page_manager:
+        yield f'  epm.set_retirement_threshold({error_page_manager["retirement_threshold"]});'
+    if 'baseline_retirement_threshold' in error_page_manager:
+        yield f'  epm.set_baseline_retirement_threshold({error_page_manager["baseline_retirement_threshold"]});'
+    if 'debug' in error_page_manager:
+        yield f'  epm.set_debug({error_page_manager["debug"]});'
 
     # Set DRAM references for dynamic error latency calculation
     yield ''

@@ -4,271 +4,387 @@
 #include <fmt/core.h>
 #include <random>
 #include <algorithm>
+#include <cmath>
 
 // Static member initialization
 std::unique_ptr<ErrorPageManager> ErrorPageManager::instance = nullptr;
 
 // ============================================================
-// Dual-Layer Error Recording (EPT) Implementation
+// H3 Hash Implementation
 // ============================================================
+
+void H3Hash::init(int num_k, int bloom_size, uint64_t seed) {
+    k = num_k;
+    output_bits = 0;
+    int m = bloom_size;
+    while (m > 1) { output_bits++; m >>= 1; }
+    // output_bits = log2(bloom_size)
+
+    std::mt19937_64 rng(seed);
+    matrices.resize(k);
+    for (int i = 0; i < k; i++) {
+        matrices[i].resize(input_bits);
+        for (int j = 0; j < input_bits; j++) {
+            // Generate random value, mask to output_bits
+            matrices[i][j] = static_cast<uint32_t>(rng() & ((1ULL << output_bits) - 1));
+        }
+    }
+}
+
+std::vector<int> H3Hash::hash(uint16_t cl_index) const {
+    std::vector<int> results(k, 0);
+    for (int i = 0; i < k; i++) {
+        uint32_t h = 0;
+        uint16_t val = cl_index;
+        for (int j = 0; j < input_bits; j++) {
+            if (val & 1) {
+                h ^= matrices[i][j];
+            }
+            val >>= 1;
+        }
+        results[i] = static_cast<int>(h);
+    }
+    return results;
+}
+
+// ============================================================
+// ETTEntry Implementation
+// ============================================================
+
+void ETTEntry::insert(uint16_t cl_index, const H3Hash& h3) {
+    auto positions = h3.hash(cl_index);
+    for (int pos : positions) {
+        if (pos < static_cast<int>(bloom_filter.size())) {
+            bloom_filter[pos] = true;
+        }
+    }
+}
+
+bool ETTEntry::query(uint16_t cl_index, const H3Hash& h3) const {
+    auto positions = h3.hash(cl_index);
+    for (int pos : positions) {
+        if (pos >= static_cast<int>(bloom_filter.size()) || !bloom_filter[pos]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void ETTEntry::clear(size_t bloom_filter_size) {
+    tag = 0;
+    bloom_filter.assign(bloom_filter_size, false);
+    lru_counter = 0;
+    valid = false;
+}
+
+// ============================================================
+// ErrorPageManager ETT Implementation
+// ============================================================
+
+void ErrorPageManager::init_ett() {
+    // Initialize H3 hash with fixed seed for reproducibility
+    h3_hash.init(static_cast<int>(bloom_filter_k), static_cast<int>(bloom_filter_size), 54321);
+
+    // Initialize ETT entries
+    ett.resize(ett_num_entries);
+    for (auto& entry : ett) {
+        entry.clear(bloom_filter_size);
+    }
+
+    // Initialize ECT entries (structure only)
+    ect.resize(ect_num_entries);
+    for (auto& entry : ect) {
+        entry.tag = 0;
+        entry.counter = 0;
+        entry.valid = false;
+    }
+}
+
+// Helper: count set bits in bloom filter
+static size_t count_bloom_bits(const std::vector<bool>& bf) {
+    size_t count = 0;
+    for (size_t i = 0; i < bf.size(); i++) {
+        if (bf[i]) count++;
+    }
+    return count;
+}
 
 ErrorRecordResult ErrorPageManager::record_error(uint64_t pa) {
     uint64_t page_base = get_page_base_pa(pa);
     uint16_t cl_index = extract_cache_line_index(pa);
 
-    // Build the full 64B-aligned address for error_addresses set (shifted by 6)
-    uint64_t aligned_addr_shifted = pa >> 6;
+    if (debug == 1) {
+        fmt::print("[ETT] ---- record_error(pa=0x{:x}) ----\n", pa);
+        fmt::print("[ETT]   page_base=0x{:x}  cl_index={}\n", page_base, cl_index);
+    }
 
-    // Check if this exact position is already known
-    auto inline_it = inline_descriptors.find(page_base);
-    if (inline_it != inline_descriptors.end()) {
-        // Page has at least one error - check if this position is already tracked
-        if (inline_it->second == cl_index) {
-            stat_already_known_count++;
-            return ErrorRecordResult::ALREADY_KNOWN;
+    // === Duplicate check via bloom filter ===
+    int ett_idx = find_ett_entry(page_base);
+    if (ett_idx >= 0 && ett[ett_idx].query(cl_index, h3_hash)) {
+        stat_already_known_count++;
+        if (debug == 1) {
+            auto positions = h3_hash.hash(cl_index);
+            fmt::print("[ETT]   ALREADY_KNOWN: bloom filter hit at ETT[{}], hash positions=[", ett_idx);
+            for (size_t i = 0; i < positions.size(); i++) {
+                fmt::print("{}{}", positions[i], (i + 1 < positions.size()) ? "," : "");
+            }
+            fmt::print("] all=1\n");
         }
-        // Check EPT for this position
-        if (multi_error_pages.find(page_base) != multi_error_pages.end()) {
-            int ept_idx = find_ept_entry(page_base);
-            if (ept_idx >= 0) {
-                for (uint8_t s = 0; s < ept[ept_idx].slot_count; s++) {
-                    if (ept[ept_idx].slots[s] == cl_index) {
-                        // Update LRU
-                        ept[ept_idx].lru_counter = ++ept_lru_counter;
-                        stat_already_known_count++;
-                        return ErrorRecordResult::ALREADY_KNOWN;
-                    }
-                }
+        return ErrorRecordResult::ALREADY_KNOWN;
+    }
+
+    // === New error: increment counter ===
+    uint8_t old_counter = page_error_counters[page_base];
+    uint8_t new_count = old_counter + 1;
+    page_error_counters[page_base] = new_count;
+
+    if (debug == 1) {
+        fmt::print("[ETT]   counter: {} -> {}", old_counter, new_count);
+        if (new_count >= retirement_threshold) {
+            fmt::print("  (>= threshold {})\n", retirement_threshold);
+        } else {
+            fmt::print("  (threshold={})\n", retirement_threshold);
+        }
+    }
+
+    // === Retirement check ===
+    if (new_count >= retirement_threshold) {
+        if (debug == 1) {
+            // Show bloom filter state before retirement
+            if (ett_idx >= 0) {
+                size_t bits_set = count_bloom_bits(ett[ett_idx].bloom_filter);
+                fmt::print("[ETT]   ETT[{}] bloom filter before retire: {}/{} bits set ({:.1f}%)\n",
+                           ett_idx, bits_set, bloom_filter_size,
+                           100.0 * bits_set / bloom_filter_size);
             }
         }
+        retire_page(page_base, ett_idx);
+        stat_retirement_count++;
+        if (debug == 1) {
+            fmt::print("[ETT]   => PAGE_RETIRED\n");
+        }
+        return ErrorRecordResult::PAGE_RETIRED;
     }
 
-    // === Case 1: First error on this page ===
-    if (inline_it == inline_descriptors.end()) {
-        inline_descriptors[page_base] = cl_index;
-        error_addresses.insert(aligned_addr_shifted);
-        stat_case1_count++;
+    // === Insert into ETT bloom filter ===
+    bool new_ett_entry = false;
+    if (ett_idx < 0) {
+        ett_idx = allocate_ett_entry(page_base);
+        new_ett_entry = true;
+    }
+
+    // Get hash positions for debug
+    auto positions = h3_hash.hash(cl_index);
+
+    if (ett_idx >= 0) {
         if (debug == 1) {
-            fmt::print("[EPT] Case1 FIRST_ERROR: page=0x{:x} cl_index={} pa=0x{:x}\n",
-                       page_base, cl_index, pa);
+            if (new_ett_entry) {
+                fmt::print("[ETT]   ETT entry ALLOCATED: ETT[{}] for page 0x{:x}\n", ett_idx, page_base);
+            } else {
+                fmt::print("[ETT]   ETT entry EXISTS: ETT[{}]\n", ett_idx);
+            }
+            // Show which bloom filter bits will be set
+            fmt::print("[ETT]   H3 hash(cl_index={}) -> positions=[", cl_index);
+            for (size_t i = 0; i < positions.size(); i++) {
+                fmt::print("{}{}", positions[i], (i + 1 < positions.size()) ? "," : "");
+            }
+            fmt::print("]\n");
+            // Show before state of those bits
+            fmt::print("[ETT]   bloom bits before: [");
+            for (size_t i = 0; i < positions.size(); i++) {
+                int pos = positions[i];
+                fmt::print("bit[{}]={}{}", pos,
+                           (pos < static_cast<int>(ett[ett_idx].bloom_filter.size()) && ett[ett_idx].bloom_filter[pos]) ? 1 : 0,
+                           (i + 1 < positions.size()) ? ", " : "");
+            }
+            fmt::print("]\n");
+        }
+
+        ett[ett_idx].insert(cl_index, h3_hash);
+        ett[ett_idx].lru_counter = ++ett_lru_counter;
+
+        if (debug == 1) {
+            size_t bits_set = count_bloom_bits(ett[ett_idx].bloom_filter);
+            fmt::print("[ETT]   bloom bits after insert: {}/{} bits set ({:.1f}%)\n",
+                       bits_set, bloom_filter_size,
+                       100.0 * bits_set / bloom_filter_size);
+        }
+    }
+
+    if (new_count == 1) {
+        stat_first_error_count++;
+        if (debug == 1) {
+            fmt::print("[ETT]   => FIRST_ERROR\n");
         }
         return ErrorRecordResult::FIRST_ERROR;
-    }
-
-    // === Case 2: Second error (inline exists, multi not set) ===
-    if (multi_error_pages.find(page_base) == multi_error_pages.end()) {
-        multi_error_pages.insert(page_base);
-        int ept_idx = allocate_ept_entry(page_base);
-        if (ept_idx >= 0) {
-            ept[ept_idx].slots[0] = cl_index;
-            ept[ept_idx].slot_count = 1;
-            ept[ept_idx].lru_counter = ++ept_lru_counter;
-        }
-        error_addresses.insert(aligned_addr_shifted);
-        stat_case2_count++;
+    } else {
+        stat_added_error_count++;
         if (debug == 1) {
-            fmt::print("[EPT] Case2 SECOND_ERROR: page=0x{:x} cl_index={} ept_idx={} pa=0x{:x}\n",
-                       page_base, cl_index, ept_idx, pa);
+            fmt::print("[ETT]   => ADDED_ERROR (count={})\n", new_count);
         }
         return ErrorRecordResult::ADDED_ERROR;
     }
-
-    // === Case 3: Third or more error (multi already set) ===
-    int ept_idx = find_ept_entry(page_base);
-
-    // EPT entry exists for this page
-    if (ept_idx >= 0) {
-        if (ept[ept_idx].slot_count < EPT_SLOTS_PER_ENTRY) {
-            // Still have room in EPT
-            ept[ept_idx].slots[ept[ept_idx].slot_count] = cl_index;
-            ept[ept_idx].slot_count++;
-            ept[ept_idx].lru_counter = ++ept_lru_counter;
-            error_addresses.insert(aligned_addr_shifted);
-            stat_case3_count++;
-            if (debug == 1) {
-                fmt::print("[EPT] Case3 ADDED_ERROR: page=0x{:x} cl_index={} slot={} pa=0x{:x}\n",
-                           page_base, cl_index, ept[ept_idx].slot_count - 1, pa);
-            }
-            return ErrorRecordResult::ADDED_ERROR;
-        } else {
-            // EPT full for this page (4 slots used + 1 inline = 5 total)
-            // 6th error → page retirement: clean up all tracking and unpin
-            retire_page(page_base, ept_idx);
-            stat_retirement_count++;
-            if (debug == 1) {
-                fmt::print("[EPT] PAGE_RETIRED: page=0x{:x} cl_index={} (6th error) pa=0x{:x}\n",
-                           page_base, cl_index, pa);
-            }
-            return ErrorRecordResult::PAGE_RETIRED;
-        }
-    }
-
-    // EPT entry was evicted for this page (multi is set but no EPT entry)
-    // Need to re-allocate EPT entry
-    ept_idx = allocate_ept_entry(page_base);
-    if (ept_idx >= 0) {
-        ept[ept_idx].slots[0] = cl_index;
-        ept[ept_idx].slot_count = 1;
-        ept[ept_idx].lru_counter = ++ept_lru_counter;
-    }
-    error_addresses.insert(aligned_addr_shifted);
-    stat_case3_count++;
-    if (debug == 1) {
-        fmt::print("[EPT] Case3 RE-ALLOC: page=0x{:x} cl_index={} ept_idx={} pa=0x{:x}\n",
-                   page_base, cl_index, ept_idx, pa);
-    }
-    return ErrorRecordResult::ADDED_ERROR;
 }
 
 bool ErrorPageManager::is_error_position(uint64_t pa) const {
-    uint64_t aligned_addr_shifted = pa >> 6;
-    return error_addresses.find(aligned_addr_shifted) != error_addresses.end();
+    uint64_t page_base = get_page_base_pa(pa);
+
+    // Fast path: no errors on this page
+    auto it = page_error_counters.find(page_base);
+    if (it == page_error_counters.end() || it->second == 0) {
+        return false;
+    }
+
+    // Query ETT bloom filter
+    uint16_t cl_index = extract_cache_line_index(pa);
+    return ett_query(page_base, cl_index);
 }
 
-std::vector<uint64_t> ErrorPageManager::get_ept_eviction_victims(size_t ept_index) const {
-    std::vector<uint64_t> victims;
-    if (ept_index >= EPT_NUM_ENTRIES || !ept[ept_index].valid) {
-        return victims;
+bool ErrorPageManager::ett_query(uint64_t page_base, uint16_t cl_index) const {
+    int ett_idx = find_ett_entry(page_base);
+    if (ett_idx < 0) {
+        return false;
     }
-    const auto& entry = ept[ept_index];
-    for (uint8_t s = 0; s < entry.slot_count; s++) {
-        // Reconstruct full PA from page base + cache line index
-        uint64_t full_pa = entry.tag | (static_cast<uint64_t>(entry.slots[s]) << 6);
-        // Return the shifted address (matching error_addresses format)
-        victims.push_back(full_pa >> 6);
-    }
-    return victims;
+    return ett[ett_idx].query(cl_index, h3_hash);
 }
 
-int ErrorPageManager::find_ept_entry(uint64_t page_base_pa) const {
-    for (size_t i = 0; i < EPT_NUM_ENTRIES; i++) {
-        if (ept[i].valid && ept[i].tag == page_base_pa) {
+int ErrorPageManager::find_ett_entry(uint64_t page_base_pa) const {
+    for (size_t i = 0; i < ett_num_entries; i++) {
+        if (ett[i].valid && ett[i].tag == page_base_pa) {
             return static_cast<int>(i);
         }
     }
     return -1;
 }
 
-int ErrorPageManager::allocate_ept_entry(uint64_t page_base_pa) {
+int ErrorPageManager::allocate_ett_entry(uint64_t page_base_pa) {
     // First, try to find an invalid (empty) entry
-    for (size_t i = 0; i < EPT_NUM_ENTRIES; i++) {
-        if (!ept[i].valid) {
-            ept[i].valid = true;
-            ept[i].tag = page_base_pa;
-            ept[i].slot_count = 0;
-            ept[i].lru_counter = ++ept_lru_counter;
+    for (size_t i = 0; i < ett_num_entries; i++) {
+        if (!ett[i].valid) {
+            ett[i].valid = true;
+            ett[i].tag = page_base_pa;
+            ett[i].bloom_filter.assign(bloom_filter_size, false);
+            ett[i].lru_counter = ++ett_lru_counter;
             return static_cast<int>(i);
         }
     }
 
     // All entries full - evict LRU
-    int victim_idx = evict_ept_lru();
+    int victim_idx = evict_ett_lru();
     if (victim_idx >= 0) {
-        // Before eviction: remove the EPT-tracked error positions from error_addresses
-        auto victims = get_ept_eviction_victims(static_cast<size_t>(victim_idx));
-        for (auto addr_shifted : victims) {
-            error_addresses.erase(addr_shifted);
-        }
-
         if (debug == 1) {
-            fmt::print("[EPT] EVICT: entry={} page=0x{:x} slots_removed={}\n",
-                       victim_idx, ept[victim_idx].tag, ept[victim_idx].slot_count);
+            fmt::print("[ETT] EVICT: entry={} page=0x{:x}\n",
+                       victim_idx, ett[victim_idx].tag);
         }
 
-        stat_ept_eviction_count++;
+        stat_ett_eviction_count++;
 
         // Re-initialize the entry
-        ept[victim_idx].valid = true;
-        ept[victim_idx].tag = page_base_pa;
-        ept[victim_idx].slot_count = 0;
-        ept[victim_idx].lru_counter = ++ept_lru_counter;
+        ett[victim_idx].valid = true;
+        ett[victim_idx].tag = page_base_pa;
+        ett[victim_idx].bloom_filter.assign(bloom_filter_size, false);
+        ett[victim_idx].lru_counter = ++ett_lru_counter;
     }
     return victim_idx;
 }
 
-int ErrorPageManager::evict_ept_lru() {
+int ErrorPageManager::evict_ett_lru() {
     int victim = -1;
     uint64_t min_lru = UINT64_MAX;
-    for (size_t i = 0; i < EPT_NUM_ENTRIES; i++) {
-        if (ept[i].valid && ept[i].lru_counter < min_lru) {
-            min_lru = ept[i].lru_counter;
+    for (size_t i = 0; i < ett_num_entries; i++) {
+        if (ett[i].valid && ett[i].lru_counter < min_lru) {
+            min_lru = ett[i].lru_counter;
             victim = static_cast<int>(i);
         }
     }
     return victim;
 }
 
-void ErrorPageManager::retire_page(uint64_t page_base, int ept_idx) {
+void ErrorPageManager::retire_page(uint64_t page_base, int ett_idx) {
     // Page retirement = new page allocation emulation
-    // Clean up all tracking so the page starts fresh (as if a new physical page)
-    // retirement_count is tracked by the caller for statistics
-
-    // 1. Remove inline descriptor's error address from error_addresses
-    auto inline_it = inline_descriptors.find(page_base);
-    if (inline_it != inline_descriptors.end()) {
-        uint64_t inline_pa = page_base | (static_cast<uint64_t>(inline_it->second) << 6);
-        error_addresses.erase(inline_pa >> 6);
-        inline_descriptors.erase(inline_it);
-    }
-
-    // 3. Remove EPT entry's error addresses from error_addresses
-    if (ept_idx >= 0 && ept[ept_idx].valid) {
-        for (uint8_t s = 0; s < ept[ept_idx].slot_count; s++) {
-            uint64_t slot_pa = page_base | (static_cast<uint64_t>(ept[ept_idx].slots[s]) << 6);
-            error_addresses.erase(slot_pa >> 6);
-        }
-        ept[ept_idx].valid = false;
-    }
-
-    // 4. Remove from multi_error_pages
-    multi_error_pages.erase(page_base);
+    // Clean up all tracking so the page starts fresh
 
     if (debug == 1) {
-        fmt::print("[EPT] RETIRE_CLEANUP: page=0x{:x} removed from inline/EPT/error_addresses\n", page_base);
+        fmt::print("[ETT]   RETIRE page=0x{:x}:\n", page_base);
+    }
+
+    // 1. Remove page error counter
+    page_error_counters.erase(page_base);
+    if (debug == 1) {
+        fmt::print("[ETT]     1. page_error_counters: erased\n");
+    }
+
+    // 2. Invalidate ETT entry
+    if (ett_idx >= 0 && static_cast<size_t>(ett_idx) < ett_num_entries && ett[ett_idx].valid) {
+        if (debug == 1) {
+            size_t bits_set = count_bloom_bits(ett[ett_idx].bloom_filter);
+            fmt::print("[ETT]     2. ETT[{}]: cleared (had {}/{} bloom bits set)\n",
+                       ett_idx, bits_set, bloom_filter_size);
+        }
+        ett[ett_idx].clear(bloom_filter_size);
+    } else {
+        if (debug == 1) {
+            fmt::print("[ETT]     2. ETT entry: not found (idx={})\n", ett_idx);
+        }
+    }
+
+    // 3. Queue page for LLC error way sweep
+    pending_retirement_pages.push_back(page_base);
+    if (debug == 1) {
+        fmt::print("[ETT]     3. pending_retirement_pages: queued (total pending={})\n",
+                   pending_retirement_pages.size());
     }
 }
 
-size_t ErrorPageManager::get_ept_used_entries() const {
+size_t ErrorPageManager::get_ett_used_entries() const {
     size_t count = 0;
-    for (size_t i = 0; i < EPT_NUM_ENTRIES; i++) {
-        if (ept[i].valid) count++;
+    for (size_t i = 0; i < ett_num_entries; i++) {
+        if (ett[i].valid) count++;
     }
     return count;
 }
 
-void ErrorPageManager::print_ept_stats() const {
-    uint64_t total_new_recordings = stat_case1_count + stat_case2_count + stat_case3_count;
+void ErrorPageManager::print_ett_stats() const {
+    uint64_t total_new_recordings = stat_first_error_count + stat_added_error_count;
     uint64_t total_dram_error_events = total_new_recordings + stat_retirement_count + stat_already_known_count;
-    uint64_t active_single_error_pages = inline_descriptors.size() - multi_error_pages.size();
 
-    fmt::print("\n[EPT] ========== Error Position Table Statistics ==========\n");
+    // Count multi-error pages from page_error_counters
+    uint64_t multi_error_page_count = 0;
+    for (const auto& [page, cnt] : page_error_counters) {
+        if (cnt >= 2) multi_error_page_count++;
+    }
+    uint64_t active_single_error_pages = page_error_counters.size() - multi_error_page_count;
 
-    fmt::print("[EPT]\n");
-    fmt::print("[EPT] [DRAM Error Events]\n");
-    fmt::print("[EPT]   Total DRAM Error Events:       {}\n", total_dram_error_events);
-    fmt::print("[EPT]     New Error Recordings:        {}\n", total_new_recordings);
-    fmt::print("[EPT]       Case 1 (1st error/page):   {}\n", stat_case1_count);
-    fmt::print("[EPT]       Case 2 (2nd error/page):   {}\n", stat_case2_count);
-    fmt::print("[EPT]       Case 3 (3rd~5th err/page): {}\n", stat_case3_count);
-    fmt::print("[EPT]     Page Retirements (6th err):  {}\n", stat_retirement_count);
-    fmt::print("[EPT]     Already Known (duplicate):   {}\n", stat_already_known_count);
+    fmt::print("\n[ETT] ========== Error Tracking Table Statistics ==========\n");
 
-    fmt::print("[EPT]\n");
-    fmt::print("[EPT] [Page Status]  (after retirement, page resets to clean)\n");
-    fmt::print("[EPT]   Active Pages (pinned):         {}\n", inline_descriptors.size());
-    fmt::print("[EPT]     Single-error pages:          {}\n", active_single_error_pages);
-    fmt::print("[EPT]     Multi-error pages:           {}\n", multi_error_pages.size());
+    fmt::print("[ETT]\n");
+    fmt::print("[ETT] [Configuration]\n");
+    fmt::print("[ETT]   ETT Entries:                    {}\n", ett_num_entries);
+    fmt::print("[ETT]   Bloom Filter Size (m):          {} bits\n", bloom_filter_size);
+    fmt::print("[ETT]   Hash Functions (k):             {}\n", bloom_filter_k);
+    fmt::print("[ETT]   Retirement Threshold:           {}\n", retirement_threshold);
 
-    fmt::print("[EPT]\n");
-    fmt::print("[EPT] [EPT Table Usage]\n");
-    fmt::print("[EPT]   EPT Entries Used:              {} / {}\n", get_ept_used_entries(), EPT_NUM_ENTRIES);
-    fmt::print("[EPT]   EPT Evictions:                 {}\n", stat_ept_eviction_count);
+    fmt::print("[ETT]\n");
+    fmt::print("[ETT] [DRAM Error Events]\n");
+    fmt::print("[ETT]   Total DRAM Error Events:        {}\n", total_dram_error_events);
+    fmt::print("[ETT]     New Error Recordings:         {}\n", total_new_recordings);
+    fmt::print("[ETT]       First Error (per page):     {}\n", stat_first_error_count);
+    fmt::print("[ETT]       Additional Errors:          {}\n", stat_added_error_count);
+    fmt::print("[ETT]     Page Retirements ({}th err): {}\n", retirement_threshold, stat_retirement_count);
+    fmt::print("[ETT]     Already Known (bloom hit):    {}\n", stat_already_known_count);
 
-    fmt::print("[EPT]\n");
-    fmt::print("[EPT] [LLC Pinning]\n");
-    fmt::print("[EPT]   Currently Pinned Positions:    {}\n", error_addresses.size());
+    fmt::print("[ETT]\n");
+    fmt::print("[ETT] [Page Status]  (after retirement, page resets to clean)\n");
+    fmt::print("[ETT]   Active Pages (tracked):         {}\n", page_error_counters.size());
+    fmt::print("[ETT]     Single-error pages:           {}\n", active_single_error_pages);
+    fmt::print("[ETT]     Multi-error pages:            {}\n", multi_error_page_count);
 
-    fmt::print("[EPT] ======================================================\n");
+    fmt::print("[ETT]\n");
+    fmt::print("[ETT] [ETT Table Usage]\n");
+    fmt::print("[ETT]   ETT Entries Used:               {} / {}\n", get_ett_used_entries(), ett_num_entries);
+    fmt::print("[ETT]   ETT Evictions:                  {}\n", stat_ett_eviction_count);
+
+    fmt::print("[ETT] ============================================================\n");
 }
 
 // ============================================================

@@ -102,5 +102,10 @@ def error_page_manager_defaults():
         'cache_pinning': False,
         'dynamic_error_latency': True,
         'max_error_ways_per_set': 8,
-        'retirement_latency': 109200
+        'ett_entries': 64,
+        'bloom_filter_size': 256,
+        'bloom_filter_k': 4,
+        'retirement_threshold': 32,
+        'baseline_retirement_threshold': 6,
+        'debug': 0,
     }

@@ -188,13 +188,20 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
     // Find Error Way
     auto [error_way, error_way_idx] = find_error_way(set_idx, set_begin, set_end);
 
-    // Debug output
-    if(debug_mode){
-      fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, Set: {}, Way: {}\n",
-               fill_mshr.address.to<uint64_t>(), set_idx, error_way_idx);  
+    if (error_way != set_end && error_way_idx >= 0) {
+      // Debug output
+      if(debug_mode){
+        fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, Set: {}, Way: {}\n",
+                 fill_mshr.address.to<uint64_t>(), set_idx, error_way_idx);
+      }
+      way = error_way;
+      way_idx = error_way_idx;
+    } else {
+      // Error way allocation failed — fall back to normal way
+      auto [normal_way, normal_way_idx] = find_normal_way(fill_mshr, set_idx, set_begin);
+      way = normal_way;
+      way_idx = normal_way_idx;
     }
-    way = error_way;
-    way_idx = error_way_idx;
   } else {
     // Find Normal Way
     auto [normal_way, normal_way_idx] = find_normal_way(fill_mshr, set_idx, set_begin);
@@ -252,7 +259,7 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
    * ======================================== */
   if (epm.is_cache_pinning_enabled() && NAME == "LLC" && is_error_data(fill_mshr.address) && way_idx >= get_error_way_start() && way_idx < NUM_WAY) {
     // Error Way에 데이터를 채웠으므로 타임스탬프 업데이트
-    long error_way_offset = way_idx - get_error_way_start();
+    long error_way_offset = (NUM_WAY - 1) - way_idx;  // stable index: way15=0, way14=1, ...
     std::size_t idx = static_cast<std::size_t>(set_idx * get_max_error_way_limit() + error_way_offset);
     if (idx < error_way_last_used_cycles.size()) {
       error_way_last_used_cycles[idx] = error_way_cycle++;
@@ -337,7 +344,7 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
       if (way_idx >= error_way_start && way_idx < NUM_WAY) {
         // Error Way Hit → 타임스탬프 업데이트
         long set_idx = get_set_index(handle_pkt.address);
-        long error_way_offset = way_idx - error_way_start;
+        long error_way_offset = (NUM_WAY - 1) - way_idx;  // stable index: way15=0, way14=1, ...
         std::size_t idx = static_cast<std::size_t>(set_idx * get_max_error_way_limit() + error_way_offset);
         if (idx < error_way_last_used_cycles.size()) {
           error_way_last_used_cycles[idx] = error_way_cycle++;
@@ -482,6 +489,17 @@ long CACHE::operate()
 
   for (auto* ul : upper_levels) {
     ul->check_collision();
+  }
+
+  // Process pending LLC page retirements (sweep error ways by page boundary)
+  if (NAME == "LLC") {
+    auto& epm = ErrorPageManager::get_instance();
+    if (epm.is_cache_pinning_enabled() && epm.has_pending_retirements()) {
+      auto pages = epm.drain_pending_retirements();
+      for (auto page_base : pages) {
+        invalidate_page_error_ways(page_base);
+      }
+    }
   }
 
   // Finish returns
@@ -1016,7 +1034,8 @@ bool CACHE::allocate_error_way(long way_idx)
 
   const auto max_error_way_limit = get_max_error_way_limit();
   if (error_way_count >= max_error_way_limit) {
-    fmt::print("[{}] Cannot allocate Way {} as Error Way because maximum number of Error Ways ({}) have already been allocated\n", NAME, way_idx, max_error_way_limit);
+    if (ErrorPageManager::get_instance().get_debug() == 1)
+      fmt::print("[{}] Cannot allocate Way {} as Error Way because maximum number of Error Ways ({}) have already been allocated\n", NAME, way_idx, max_error_way_limit);
     return false;
   }
 
@@ -1030,11 +1049,13 @@ bool CACHE::allocate_error_way(long way_idx)
     }
   }
   if (!failed_sets.empty()) {
-    fmt::print("[{}] Failed to allocate Way {} as Error Way for Sets: ", NAME, way_idx);
-    for (const auto& set_idx : failed_sets) {
-      fmt::print("{} ", set_idx);
+    if (ErrorPageManager::get_instance().get_debug() == 1) {
+      fmt::print("[{}] Failed to allocate Way {} as Error Way for Sets: ", NAME, way_idx);
+      for (const auto& set_idx : failed_sets) {
+        fmt::print("{} ", set_idx);
+      }
+      fmt::print("\n");
     }
-    fmt::print("\n");
     return false;
   }
 
@@ -1115,16 +1136,17 @@ auto CACHE::find_error_way(long set_idx,
   }
 
   long error_count = error_way_count;
+  int epm_debug_flag = ErrorPageManager::get_instance().get_debug();
 
   // ========== Case 1: Error Way가 없음. 첫 할당 ==========
   if (error_count == 0) {
     long new_error_way = NUM_WAY - 1;  // Way 15 (마지막 Way)
-    fmt::print("[{}] ALLOC_NEW: Set {} triggering Way {} allocation (count: 0→1)\n", NAME, set_idx, new_error_way);
+    if (epm_debug_flag == 1) fmt::print("[{}] ALLOC_NEW: Set {} triggering Way {} allocation (count: 0→1)\n", NAME, set_idx, new_error_way);
     if (!allocate_error_way(new_error_way)) {
-      fmt::print("[{}] ALLOC_FAIL: Way {} allocation failed (count stays 0)\n", NAME, new_error_way);
+      if (epm_debug_flag == 1) fmt::print("[{}] ALLOC_FAIL: Way {} allocation failed (count stays 0)\n", NAME, new_error_way);
       return {set_end, -1};
     }
-    fmt::print("[{}] ALLOC_OK: Way {} allocated (count now {})\n", NAME, new_error_way, error_way_count);
+    if (epm_debug_flag == 1) fmt::print("[{}] ALLOC_OK: Way {} allocated (count now {})\n", NAME, new_error_way, error_way_count);
     auto way = std::next(set_begin, new_error_way);
     return {way, new_error_way};
   }
@@ -1148,13 +1170,13 @@ auto CACHE::find_error_way(long set_idx,
   // ========== Case 3: 현재 할당된 Way 꽉참. 확장 가능? ==========
   if (can_expand_error_way()) {
     long new_error_way = error_start - 1;  // 예: 15 → 14 → 13...
-    fmt::print("[{}] EXPAND: Set {} expanding to Way {} (count: {}→{})\n", NAME, set_idx, new_error_way, error_count, error_count + 1);
+    if (epm_debug_flag == 1) fmt::print("[{}] EXPAND: Set {} expanding to Way {} (count: {}→{})\n", NAME, set_idx, new_error_way, error_count, error_count + 1);
 
     if (!allocate_error_way(new_error_way)) {
-      fmt::print("[{}] EXPAND_FAIL: Way {} expansion failed\n", NAME, new_error_way);
+      if (epm_debug_flag == 1) fmt::print("[{}] EXPAND_FAIL: Way {} expansion failed\n", NAME, new_error_way);
       return {set_end, -1};
     }
-    fmt::print("[{}] EXPAND_OK: Way {} allocated (count now {})\n", NAME, new_error_way, error_way_count);
+    if (epm_debug_flag == 1) fmt::print("[{}] EXPAND_OK: Way {} allocated (count now {})\n", NAME, new_error_way, error_way_count);
     auto way = std::next(set_begin, new_error_way);
     return {way, new_error_way};
   }
@@ -1162,9 +1184,15 @@ auto CACHE::find_error_way(long set_idx,
   // ========== Case 4: Error Way가 모두 꽉 참 → LRU victim 선택 ==========
   long victim_idx = find_error_victim(set_idx, set_begin, error_begin, error_finish);
   auto way = std::next(set_begin, victim_idx);
-  bool debug_mode = false; //hamoci: revise this for debug print
-  if (debug_mode) {
-    fmt::print("[{}] LRU_VICTIM: Set {} using Way {} (full, selecting LRU)\n", NAME, set_idx, victim_idx);
+  auto& epm_debug = ErrorPageManager::get_instance();
+  if (epm_debug.get_debug() == 1) {
+    auto victim_it = std::next(set_begin, victim_idx);
+    if (victim_it->valid) {
+      fmt::print("[{}] LRU_VICTIM: Set {} evicting Way {} (addr=0x{:x}) for new error data\n",
+                 NAME, set_idx, victim_idx, victim_it->address.to<uint64_t>());
+    } else {
+      fmt::print("[{}] EMPTY_SLOT: Set {} using empty Way {}\n", NAME, set_idx, victim_idx);
+    }
   }
   return {way, victim_idx};
 }
@@ -1232,7 +1260,7 @@ long CACHE::find_error_victim(long set_idx,
   uint64_t min_cycle = UINT64_MAX;
 
   for (long way = error_start; way < NUM_WAY; ++way) {
-    long error_way_offset = way - error_start;
+    long error_way_offset = (NUM_WAY - 1) - way;  // stable index: way15=0, way14=1, ...
     std::size_t idx = static_cast<std::size_t>(set_idx * get_max_error_way_limit() + error_way_offset);
 
     if (idx < error_way_last_used_cycles.size()) {
@@ -1252,8 +1280,16 @@ long CACHE::find_error_victim(long set_idx,
 bool CACHE::is_error_data(champsim::address addr) const
 {
   auto& epm = ErrorPageManager::get_instance();
-  // EPT dual-layer: check inline descriptor + EPT + retired page
-  return epm.is_error_position(addr.to<uint64_t>());
+  uint64_t pa = addr.to<uint64_t>();
+  uint64_t page_base = pa & ~((1ULL << 21) - 1);
+
+  // Fast path: no errors on this page
+  if (epm.get_page_error_counter(page_base) == 0)
+    return false;
+
+  // Query ETT bloom filter
+  uint16_t cl_index = static_cast<uint16_t>((pa >> 6) & 0x7FFF);
+  return epm.ett_query(page_base, cl_index);
 }
 
 long CACHE::get_normal_way_end() const
@@ -1342,8 +1378,39 @@ void CACHE::print_error_way_stats() const
   fmt::print("  Unused Error Way Slots: {} ({:.2f}%)\n",
              unused_error_way_slots, 100.0 - usage_percentage);
 
-  // Print EPT statistics
-  epm.print_ept_stats();
+  // Print ETT statistics (only when pinning is enabled — reached here)
+  epm.print_ett_stats();
+}
+
+void CACHE::invalidate_page_error_ways(uint64_t page_base)
+{
+  long error_start = get_error_way_start();
+  if (error_start >= NUM_WAY) return;  // no error ways allocated
+
+  auto& epm = ErrorPageManager::get_instance();
+  int debug_mode = epm.get_debug();
+
+  uint64_t page_mask = ~((1ULL << 21) - 1);  // 2MB mask
+  long invalidated_count = 0;
+  for (long set_idx = 0; set_idx < NUM_SET; set_idx++) {
+    auto [set_begin, set_end] = get_set_span_by_index(set_idx);
+    // Only sweep error ways: [error_start, NUM_WAY)
+    for (long way = error_start; way < NUM_WAY; way++) {
+      auto it = std::next(set_begin, way);
+      if (it->valid && (it->address.to<uint64_t>() & page_mask) == page_base) {
+        if (debug_mode == 1) {
+          fmt::print("[LLC_SWEEP] invalidate set={} way={} addr=0x{:x} (page=0x{:x})\n",
+                     set_idx, way, it->address.to<uint64_t>(), page_base);
+        }
+        it->valid = false;  // invalidate, no writeback needed
+        invalidated_count++;
+      }
+    }
+  }
+  if (debug_mode == 1) {
+    fmt::print("[LLC_SWEEP] page=0x{:x} sweep complete: {} cache lines invalidated from error ways [{}-{})\n",
+               page_base, invalidated_count, error_start, NUM_WAY);
+  }
 }
 
 /* Hamoci Impl End */

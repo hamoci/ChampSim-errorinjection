@@ -2,10 +2,12 @@
  * Error Page Manager for ChampSim
  * Manages error pages that require additional latency when accessed
  *
- * Dual-Layer Error Recording:
- *   - Inline Error Descriptor: PDE unused bit (1 multi + 15 position) → first error per page
- *   - Error Position Table (EPT): LLC controller internal, 64 entries, 4 slots each → 2nd~5th errors
- *   - Page Retirement: 6th+ error → large latency penalty (bad page offlining emulation)
+ * ETT (Error Tracking Table) with Bloom Filter:
+ *   - Page Error Counter: page_base → error count (up to retirement_threshold)
+ *   - ETT Entry: tag + bloom filter (m bits, H3 hash) per 2MB page
+ *   - Page Retirement: retirement_threshold-th error → page offline emulation
+ *
+ * ECT (Error Counter Table): structure only, for paper completeness
  */
 
 #ifndef ERROR_PAGE_MANAGER_H
@@ -32,19 +34,43 @@ enum class ErrorPageManagerMode {
 
 // record_error() return values
 enum class ErrorRecordResult {
-    FIRST_ERROR,      // Case 1: first error on this page, inline descriptor set
-    ADDED_ERROR,      // Case 2/3: additional error recorded in EPT
-    ALREADY_KNOWN,    // already registered error position, no new recording
-    PAGE_RETIRED,     // 6th+ error, page retirement triggered
+    FIRST_ERROR,      // first error on this page
+    ADDED_ERROR,      // additional error recorded
+    ALREADY_KNOWN,    // already registered error position (bloom filter hit)
+    PAGE_RETIRED,     // retirement threshold reached
 };
 
-// EPT Entry: one per 2MB page, holds up to 4 additional error positions
-struct EPTEntry {
-    uint64_t tag{0};            // page base PA (2MB aligned physical address)
-    uint16_t slots[4]{0};       // 15-bit cache line index per slot
-    uint8_t  slot_count{0};     // number of used slots (0~4)
-    uint64_t lru_counter{0};    // for LRU eviction
-    bool     valid{false};
+// H3 Hash for bloom filter indexing
+// Uses random bit matrices for independent hash functions
+struct H3Hash {
+    int k{4};             // number of hash functions
+    int input_bits{15};   // cl_index is 15 bits
+    int output_bits{8};   // log2(bloom_filter_size)
+    // matrices[i][j] = random value for hash function i, input bit j
+    // Each hash output = XOR of matrices[i][j] for all set bits j in input
+    std::vector<std::vector<uint32_t>> matrices;  // [k][input_bits]
+
+    void init(int num_k, int bloom_size, uint64_t seed);
+    std::vector<int> hash(uint16_t cl_index) const;
+};
+
+// ETT Entry: one per 2MB page, holds bloom filter for error positions
+struct ETTEntry {
+    uint64_t tag{0};              // page base PA (2MB aligned)
+    std::vector<bool> bloom_filter; // m bits (configurable: 128/256/512)
+    uint64_t lru_counter{0};
+    bool valid{false};
+
+    void insert(uint16_t cl_index, const H3Hash& h3);
+    bool query(uint16_t cl_index, const H3Hash& h3) const;
+    void clear(size_t bloom_filter_size);
+};
+
+// ECT Entry: structure only (paper completeness)
+struct ECTEntry {
+    uint64_t tag{0};       // page base PA
+    uint8_t counter{0};    // CE count
+    bool valid{false};
 };
 
 class ErrorPageManager {
@@ -55,34 +81,36 @@ private:
     ErrorPageManagerMode mode;
     champsim::chrono::clock::duration error_latency_penalty{};
     champsim::chrono::clock::duration pte_error_latency_penalty{};
-    champsim::chrono::clock::duration retirement_latency_penalty{};  // page retirement penalty
     static std::unique_ptr<ErrorPageManager> instance;
 
-// Dual-Layer Error Recording (EPT)
+// ETT (Error Tracking Table) with Bloom Filter
 private:
-    // Inline Error Descriptor: page_base_pa → first error's 15-bit cache line index
-    std::unordered_map<uint64_t, uint16_t> inline_descriptors;
-    // Multi-error flag: pages with 2+ errors
-    std::unordered_set<uint64_t> multi_error_pages;
-    // Error Position Table: 64 entries
-    static constexpr size_t EPT_NUM_ENTRIES = 64;
-    static constexpr size_t EPT_SLOTS_PER_ENTRY = 4;
-    static constexpr size_t MAX_ERRORS_PER_PAGE = 5;  // 1 inline + 4 EPT
-    std::array<EPTEntry, EPT_NUM_ENTRIES> ept{};
-    uint64_t ept_lru_counter{0};
-    // retired_pages removed: retirement now resets page to clean state (new page allocation emulation)
+    // Page error counters: page_base → error count
+    std::unordered_map<uint64_t, uint8_t> page_error_counters;
+    // ETT: configurable entries with bloom filters
+    size_t ett_num_entries{64};
+    size_t bloom_filter_size{256};  // m bits
+    size_t bloom_filter_k{4};      // number of hash functions
+    size_t retirement_threshold{32};
+    std::vector<ETTEntry> ett;
+    uint64_t ett_lru_counter{0};
+    H3Hash h3_hash;
 
-    // Also maintain a flat set for fast is_error_position lookup (cache line aligned addresses)
-    std::unordered_set<uint64_t> error_addresses;  // all tracked error positions (for cache is_error_data)
+    // Pending LLC page retirements (page_base values)
+    std::vector<uint64_t> pending_retirement_pages;
 
-// EPT Statistics
+// ECT (Error Counter Table) — structure only, paper completeness
 private:
-    uint64_t stat_case1_count{0};     // first error recordings
-    uint64_t stat_case2_count{0};     // second error recordings (EPT entry allocated)
-    uint64_t stat_case3_count{0};     // third+ error recordings (EPT slot appended)
-    uint64_t stat_retirement_count{0}; // pages newly retired (6th error triggers retirement)
-    uint64_t stat_ept_eviction_count{0}; // EPT entry evictions
-    uint64_t stat_already_known_count{0}; // duplicate error accesses
+    std::vector<ECTEntry> ect;  // 1024 entries default
+    size_t ect_num_entries{1024};
+
+// ETT Statistics
+private:
+    uint64_t stat_first_error_count{0};    // first error recordings
+    uint64_t stat_added_error_count{0};    // additional error recordings
+    uint64_t stat_retirement_count{0};     // pages retired
+    uint64_t stat_ett_eviction_count{0};   // ETT entry evictions
+    uint64_t stat_already_known_count{0};  // duplicate error accesses (bloom filter hit)
 
 //For Random Error Injection
 private:
@@ -103,7 +131,7 @@ private:
     champsim::chrono::picoseconds cpu_clock_period{};
     uint64_t last_error_cycle{0};  // Track the last cycle when error was triggered
     uint64_t pending_error_count{0};  // Counter for pending errors
-    int debug{1};  // Debug flag: 1 to enable [ERROR_CYCLE] and [EPT] logs, 0 to disable
+    int debug{1};  // Debug flag: 1 to enable debug logs, 0 to disable
 
 // Cache Pinning (Error Way Partitioning)
 private:
@@ -111,6 +139,11 @@ private:
     bool dynamic_error_latency_enabled{true};  // true: emulate PTW(PSC+cache), false: fixed error_latency_penalty
     uint32_t max_error_ways_per_set{8};  // Maximum number of pinned/error ways per LLC set
 
+// Baseline Page Retirement (no pinning)
+private:
+    size_t baseline_retirement_threshold{6};  // retire (reset) page after this many errors
+    std::unordered_map<uint64_t, uint32_t> baseline_page_error_counts;  // page_base → error count
+    uint64_t stat_baseline_retirement_count{0};
 
 // Error Statistics
 private:
@@ -121,6 +154,7 @@ public:
     static ErrorPageManager& get_instance() {
         if (!instance) {
             instance = std::make_unique<ErrorPageManager>();
+            instance->init_ett();
         }
         return *instance;
     }
@@ -137,42 +171,67 @@ public:
     bool is_error_page(champsim::page_number page) const { return error_pages.find(page.to<uint64_t>()) != error_pages.end(); }
 
     // ============================================================
-    // Dual-Layer Error Recording API
+    // ETT (Error Tracking Table) API
     // ============================================================
 
     // Record a new error at physical address (64B aligned).
     // Returns the result indicating which case was triggered.
     ErrorRecordResult record_error(uint64_t pa);
 
-    // Check if the given physical address (full, not shifted) is an error position
-    // that should be pinned in LLC. Checks inline descriptor + EPT + retired page.
+    // Check if the given physical address is an error position via bloom filter
     bool is_error_position(uint64_t pa) const;
 
+    // Query ETT bloom filter: page_base + cl_index
+    bool ett_query(uint64_t page_base, uint16_t cl_index) const;
 
-    // Get error positions that will be unpinned due to EPT eviction
-    // Returns the list of full physical addresses (64B aligned, NOT shifted) that were in the evicted entry
-    std::vector<uint64_t> get_ept_eviction_victims(size_t ept_index) const;
+    // Get page error counter (0 if not tracked)
+    uint8_t get_page_error_counter(uint64_t page_base) const {
+        auto it = page_error_counters.find(page_base);
+        return (it != page_error_counters.end()) ? it->second : 0;
+    }
 
-    // Legacy compatibility: is_error_address checks error_addresses set
-    bool is_error_address(champsim::address addr) const { return error_addresses.find(addr.to<uint64_t>()) != error_addresses.end(); }
+    // Drain pending LLC page retirements (called from LLC operate())
+    std::vector<uint64_t> drain_pending_retirements() {
+        std::vector<uint64_t> result;
+        result.swap(pending_retirement_pages);
+        return result;
+    }
+    bool has_pending_retirements() const { return !pending_retirement_pages.empty(); }
 
-    // Get number of tracked error addresses
-    size_t get_error_address_count() const { return error_addresses.size(); }
-    void clear_all_error_addresses() { error_addresses.clear(); inline_descriptors.clear(); multi_error_pages.clear(); for(auto& e : ept) e.valid = false; }
+    // Get number of tracked error pages
+    size_t get_error_page_counter_count() const { return page_error_counters.size(); }
+    void clear_all_ett() {
+        page_error_counters.clear();
+        for (auto& e : ett) e.valid = false;
+    }
 
-    // EPT statistics
-    uint64_t get_stat_case1_count() const { return stat_case1_count; }
-    uint64_t get_stat_case2_count() const { return stat_case2_count; }
-    uint64_t get_stat_case3_count() const { return stat_case3_count; }
+    // ETT configuration setters (must be called before simulation starts)
+    void set_ett_num_entries(size_t entries) {
+        ett_num_entries = entries;
+        init_ett();
+    }
+    void set_bloom_filter_size(size_t size) {
+        bloom_filter_size = size;
+        init_ett();
+    }
+    void set_bloom_filter_k(size_t k) {
+        bloom_filter_k = k;
+        init_ett();
+    }
+    void set_retirement_threshold(size_t threshold) { retirement_threshold = threshold; }
+    size_t get_ett_num_entries() const { return ett_num_entries; }
+    size_t get_bloom_filter_size() const { return bloom_filter_size; }
+    size_t get_bloom_filter_k() const { return bloom_filter_k; }
+    size_t get_retirement_threshold() const { return retirement_threshold; }
+
+    // ETT statistics
+    uint64_t get_stat_first_error_count() const { return stat_first_error_count; }
+    uint64_t get_stat_added_error_count() const { return stat_added_error_count; }
     uint64_t get_stat_retirement_count() const { return stat_retirement_count; }
-    uint64_t get_stat_ept_eviction_count() const { return stat_ept_eviction_count; }
+    uint64_t get_stat_ett_eviction_count() const { return stat_ett_eviction_count; }
     uint64_t get_stat_already_known_count() const { return stat_already_known_count; }
-    size_t get_ept_used_entries() const;
-    void print_ept_stats() const;
-
-    // Retirement latency
-    void set_retirement_latency(champsim::chrono::clock::duration latency) { retirement_latency_penalty = latency; }
-    champsim::chrono::clock::duration get_retirement_latency() const { return retirement_latency_penalty; }
+    size_t get_ett_used_entries() const;
+    void print_ett_stats() const;
 
     // ============================================================
     // Existing API (unchanged)
@@ -229,6 +288,28 @@ public:
     // Cache pinning capacity setter/getter
     void set_max_error_ways_per_set(uint32_t ways) { max_error_ways_per_set = std::max<uint32_t>(1, ways); }
     uint32_t get_max_error_ways_per_set() const { return max_error_ways_per_set; }
+
+    // Baseline retirement threshold setter/getter
+    void set_baseline_retirement_threshold(size_t threshold) { baseline_retirement_threshold = threshold; }
+    size_t get_baseline_retirement_threshold() const { return baseline_retirement_threshold; }
+
+    // Baseline page retirement: returns true if this error triggers retirement
+    bool record_baseline_error(uint64_t pa) {
+        uint64_t page_base = get_page_base_pa(pa);
+        auto& count = baseline_page_error_counts[page_base];
+        count++;
+        if (count >= baseline_retirement_threshold) {
+            count = 0;  // reset — emulate new page allocation
+            stat_baseline_retirement_count++;
+            if (debug == 1) {
+                fmt::print("[BASELINE_RETIRE] page=0x{:x} retired (threshold={}) pa=0x{:x}\n",
+                           page_base, baseline_retirement_threshold, pa);
+            }
+            return true;
+        }
+        return false;
+    }
+    uint64_t get_stat_baseline_retirement_count() const { return stat_baseline_retirement_count; }
 
     // Update cycle error counter (called from operate() every cycle)
     void update_cycle_errors(champsim::chrono::clock::time_point current_time) {
@@ -296,11 +377,14 @@ public:
     void print_error_pages() const;
 
 private:
-    // Internal EPT helpers
-    int find_ept_entry(uint64_t page_base_pa) const;
-    int allocate_ept_entry(uint64_t page_base_pa);
-    int evict_ept_lru();
-    void retire_page(uint64_t page_base, int ept_idx);
+    // Initialize ETT and H3 hash
+    void init_ett();
+
+    // Internal ETT helpers
+    int find_ett_entry(uint64_t page_base_pa) const;
+    int allocate_ett_entry(uint64_t page_base_pa);
+    int evict_ett_lru();
+    void retire_page(uint64_t page_base, int ett_idx);
     static uint16_t extract_cache_line_index(uint64_t pa) {
         // PA[20:6] → 15-bit cache line index within a 2MB page
         return static_cast<uint16_t>((pa >> 6) & 0x7FFF);
