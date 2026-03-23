@@ -189,6 +189,7 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
     auto [error_way, error_way_idx] = find_error_way(set_idx, set_begin, set_end);
 
     if (error_way != set_end && error_way_idx >= 0) {
+      stat_error_way_miss++;
       // Debug output
       if(debug_mode){
         fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, Set: {}, Way: {}\n",
@@ -342,7 +343,8 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
     if (epm.is_cache_pinning_enabled() && NAME == "LLC") {
       long error_way_start = get_error_way_start();
       if (way_idx >= error_way_start && way_idx < NUM_WAY) {
-        // Error Way Hit → 타임스탬프 업데이트
+        // Error Way Hit → 통계 + 타임스탬프 업데이트
+        stat_error_way_hit++;
         long set_idx = get_set_index(handle_pkt.address);
         long error_way_offset = (NUM_WAY - 1) - way_idx;  // stable index: way15=0, way14=1, ...
         std::size_t idx = static_cast<std::size_t>(set_idx * get_max_error_way_limit() + error_way_offset);
@@ -1182,6 +1184,7 @@ auto CACHE::find_error_way(long set_idx,
   }
 
   // ========== Case 4: Error Way가 모두 꽉 참 → LRU victim 선택 ==========
+  stat_error_way_eviction++;
   long victim_idx = find_error_victim(set_idx, set_begin, error_begin, error_finish);
   auto way = std::next(set_begin, victim_idx);
   auto& epm_debug = ErrorPageManager::get_instance();
@@ -1369,14 +1372,30 @@ void CACHE::print_error_way_stats() const
   double usage_percentage = (total_error_way_slots > 0) ? 
                             (static_cast<double>(used_error_way_slots) / static_cast<double>(total_error_way_slots) * 100.0) : 0.0;
 
-  fmt::print("\n{} Error Way Statistics:\n", NAME);
-  fmt::print("  Allocated Error Ways per Set: {}\n", error_way_count);
-  fmt::print("  Total Error Way Slots: {} (= {} Sets × {} Ways)\n", 
+  uint64_t total_error_way_access = stat_error_way_hit + stat_error_way_miss;
+  double error_way_hit_rate = (total_error_way_access > 0)
+      ? (static_cast<double>(stat_error_way_hit) / static_cast<double>(total_error_way_access) * 100.0) : 0.0;
+
+  fmt::print("\n[LLC] ========== Error Way Statistics ==========\n");
+  fmt::print("[LLC]\n");
+  fmt::print("[LLC] [Configuration]\n");
+  fmt::print("[LLC]   Allocated Error Ways per Set:    {}\n", error_way_count);
+  fmt::print("[LLC]   Max Error Ways per Set:          {}\n", get_max_error_way_limit());
+  fmt::print("[LLC]   Total Error Way Slots:           {} (= {} Sets x {} Ways)\n",
              total_error_way_slots, NUM_SET, error_way_count);
-  fmt::print("  Used Error Way Slots: {} ({:.2f}%)\n", 
+  fmt::print("[LLC]\n");
+  fmt::print("[LLC] [Occupancy (end of sim)]\n");
+  fmt::print("[LLC]   Used Slots:                      {} ({:.2f}%)\n",
              used_error_way_slots, usage_percentage);
-  fmt::print("  Unused Error Way Slots: {} ({:.2f}%)\n",
+  fmt::print("[LLC]   Unused Slots:                    {} ({:.2f}%)\n",
              unused_error_way_slots, 100.0 - usage_percentage);
+  fmt::print("[LLC]\n");
+  fmt::print("[LLC] [Access]\n");
+  fmt::print("[LLC]   Error Way Hits:                  {}\n", stat_error_way_hit);
+  fmt::print("[LLC]   Error Way Fills (from DRAM):     {}\n", stat_error_way_miss);
+  fmt::print("[LLC]   Error Way Hit Rate:              {:.2f}%\n", error_way_hit_rate);
+  fmt::print("[LLC]   Error Way Evictions (LRU):       {}\n", stat_error_way_eviction);
+  fmt::print("[LLC] ============================================================\n");
 
   // Print ETT statistics (only when pinning is enabled — reached here)
   epm.print_ett_stats();
@@ -1407,6 +1426,7 @@ void CACHE::invalidate_page_error_ways(uint64_t page_base)
       }
     }
   }
+  epm.add_retirement_invalidated_lines(static_cast<uint64_t>(invalidated_count));
   if (debug_mode == 1) {
     fmt::print("[LLC_SWEEP] page=0x{:x} sweep complete: {} cache lines invalidated from error ways [{}-{})\n",
                page_base, invalidated_count, error_start, NUM_WAY);

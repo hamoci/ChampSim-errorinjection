@@ -32,7 +32,7 @@
 namespace
 {
 // Focused PSC debug switch (independent from champsim::debug_print).
-constexpr bool debug_ptw_psc = true;
+constexpr bool debug_ptw_psc = false;
 }
 
 PageTableWalker::PageTableWalker(champsim::ptw_builder b)

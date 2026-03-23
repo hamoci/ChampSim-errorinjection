@@ -134,8 +134,8 @@ ErrorRecordResult ErrorPageManager::record_error(uint64_t pa) {
     }
 
     // === New error: increment counter ===
-    uint8_t old_counter = page_error_counters[page_base];
-    uint8_t new_count = old_counter + 1;
+    uint32_t old_counter = page_error_counters[page_base];
+    uint32_t new_count = old_counter + 1;
     page_error_counters[page_base] = new_count;
 
     if (debug == 1) {
@@ -203,8 +203,12 @@ ErrorRecordResult ErrorPageManager::record_error(uint64_t pa) {
         ett[ett_idx].insert(cl_index, h3_hash);
         ett[ett_idx].lru_counter = ++ett_lru_counter;
 
+        // Track cumulative bloom filter occupancy
+        size_t bits_set = count_bloom_bits(ett[ett_idx].bloom_filter);
+        stat_bloom_bits_set_sum += bits_set;
+        stat_bloom_insert_count++;
+
         if (debug == 1) {
-            size_t bits_set = count_bloom_bits(ett[ett_idx].bloom_filter);
             fmt::print("[ETT]   bloom bits after insert: {}/{} bits set ({:.1f}%)\n",
                        bits_set, bloom_filter_size,
                        100.0 * bits_set / bloom_filter_size);
@@ -383,6 +387,46 @@ void ErrorPageManager::print_ett_stats() const {
     fmt::print("[ETT] [ETT Table Usage]\n");
     fmt::print("[ETT]   ETT Entries Used:               {} / {}\n", get_ett_used_entries(), ett_num_entries);
     fmt::print("[ETT]   ETT Evictions:                  {}\n", stat_ett_eviction_count);
+
+    fmt::print("[ETT]\n");
+    fmt::print("[ETT] [Bloom Filter Occupancy]\n");
+
+    // Snapshot: current valid ETT entries
+    size_t snapshot_entries = 0;
+    double snapshot_occupancy_sum = 0.0;
+    for (size_t i = 0; i < ett_num_entries; i++) {
+        if (ett[i].valid) {
+            size_t bits_set = count_bloom_bits(ett[i].bloom_filter);
+            double occ = static_cast<double>(bits_set) / static_cast<double>(bloom_filter_size);
+            snapshot_occupancy_sum += occ;
+            snapshot_entries++;
+        }
+    }
+    double snapshot_avg_occupancy = (snapshot_entries > 0) ? (snapshot_occupancy_sum / snapshot_entries) : 0.0;
+    double snapshot_fp_rate = std::pow(snapshot_avg_occupancy, static_cast<double>(bloom_filter_k));
+    fmt::print("[ETT]   [Snapshot (end of sim)]\n");
+    fmt::print("[ETT]     Valid Entries:                 {}\n", snapshot_entries);
+    fmt::print("[ETT]     Avg Occupancy:                {:.2f}%\n", snapshot_avg_occupancy * 100.0);
+    fmt::print("[ETT]     Est. FP Rate:                 {:.4f}%\n", snapshot_fp_rate * 100.0);
+
+    // Cumulative: across all inserts
+    double cumul_avg_occupancy = (stat_bloom_insert_count > 0)
+        ? (static_cast<double>(stat_bloom_bits_set_sum) / static_cast<double>(stat_bloom_insert_count) / static_cast<double>(bloom_filter_size))
+        : 0.0;
+    double cumul_fp_rate = std::pow(cumul_avg_occupancy, static_cast<double>(bloom_filter_k));
+    fmt::print("[ETT]   [Cumulative (all inserts)]\n");
+    fmt::print("[ETT]     Total Inserts:                {}\n", stat_bloom_insert_count);
+    fmt::print("[ETT]     Avg Occupancy:                {:.2f}%\n", cumul_avg_occupancy * 100.0);
+    fmt::print("[ETT]     Est. FP Rate:                 {:.4f}%\n", cumul_fp_rate * 100.0);
+
+    fmt::print("[ETT]\n");
+    fmt::print("[ETT] [Retirement Detail]\n");
+    fmt::print("[ETT]   Pages Retired:                  {}\n", stat_retirement_count);
+    fmt::print("[ETT]   Cache Lines Invalidated:        {}\n", stat_retirement_invalidated_lines);
+    if (stat_retirement_count > 0) {
+        fmt::print("[ETT]   Avg Lines per Retirement:       {:.1f}\n",
+                   static_cast<double>(stat_retirement_invalidated_lines) / static_cast<double>(stat_retirement_count));
+    }
 
     fmt::print("[ETT] ============================================================\n");
 }

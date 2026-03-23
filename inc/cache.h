@@ -338,6 +338,11 @@ public:
   std::vector<uint64_t> error_way_last_used_cycles;
   uint64_t error_way_cycle = 0;
 
+  // Error Way statistics
+  uint64_t stat_error_way_hit{0};
+  uint64_t stat_error_way_miss{0};      // miss on error data (MSHR allocated)
+  uint64_t stat_error_way_eviction{0};  // LRU eviction within error ways
+
   // Cache Pinning 관련 함수들 (구현은 cache.cc에서 ErrorPageManager 참조)
   long get_normal_way_end() const;
   long get_error_way_start() const;

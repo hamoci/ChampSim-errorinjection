@@ -86,7 +86,7 @@ private:
 // ETT (Error Tracking Table) with Bloom Filter
 private:
     // Page error counters: page_base → error count
-    std::unordered_map<uint64_t, uint8_t> page_error_counters;
+    std::unordered_map<uint64_t, uint32_t> page_error_counters;
     // ETT: configurable entries with bloom filters
     size_t ett_num_entries{64};
     size_t bloom_filter_size{256};  // m bits
@@ -111,6 +111,13 @@ private:
     uint64_t stat_retirement_count{0};     // pages retired
     uint64_t stat_ett_eviction_count{0};   // ETT entry evictions
     uint64_t stat_already_known_count{0};  // duplicate error accesses (bloom filter hit)
+
+    // Bloom filter occupancy tracking (cumulative)
+    uint64_t stat_bloom_bits_set_sum{0};   // sum of bits_set at each insert
+    uint64_t stat_bloom_insert_count{0};   // number of inserts
+
+    // Retirement detail
+    uint64_t stat_retirement_invalidated_lines{0};  // total cache lines invalidated by retirement sweeps
 
 //For Random Error Injection
 private:
@@ -185,7 +192,7 @@ public:
     bool ett_query(uint64_t page_base, uint16_t cl_index) const;
 
     // Get page error counter (0 if not tracked)
-    uint8_t get_page_error_counter(uint64_t page_base) const {
+    uint32_t get_page_error_counter(uint64_t page_base) const {
         auto it = page_error_counters.find(page_base);
         return (it != page_error_counters.end()) ? it->second : 0;
     }
@@ -230,6 +237,7 @@ public:
     uint64_t get_stat_retirement_count() const { return stat_retirement_count; }
     uint64_t get_stat_ett_eviction_count() const { return stat_ett_eviction_count; }
     uint64_t get_stat_already_known_count() const { return stat_already_known_count; }
+    void add_retirement_invalidated_lines(uint64_t count) { stat_retirement_invalidated_lines += count; }
     size_t get_ett_used_entries() const;
     void print_ett_stats() const;
 
