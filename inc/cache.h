@@ -360,10 +360,6 @@ public:
 private:
   // 모든 Set의 특정 Way를 Error로 전환
   bool allocate_error_way(long way_idx);
-  
-  // 특정 Set의 특정 Way 데이터 evict
-  bool evict_way_data(long set_idx, long way_idx);
-  
   // Error Way 찾기
   std::pair<set_type::iterator, long> find_error_way(long set_idx,
                                                     set_type::iterator set_begin, set_type::iterator set_end);

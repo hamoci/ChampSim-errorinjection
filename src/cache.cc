@@ -198,10 +198,8 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
       way = error_way;
       way_idx = error_way_idx;
     } else {
-      // Error way allocation failed — fall back to normal way
-      auto [normal_way, normal_way_idx] = find_normal_way(fill_mshr, set_idx, set_begin);
-      way = normal_way;
-      way_idx = normal_way_idx;
+      // Error way 할당 실패 (WQ full 등) — MSHR에 남겨서 다음 cycle에 재시도
+      return false;
     }
   } else {
     // Find Normal Way
@@ -1041,55 +1039,17 @@ bool CACHE::allocate_error_way(long way_idx)
     return false;
   }
 
-  std::vector<long> failed_sets;
-
-  //모든 Set 순회
+  // Pass 1: dirty line writeback만 시도 (invalidation 없이)
+  // WQ full 시 아무것도 변경하지 않고 return false → 다음 cycle에 재시도
   for (long set_idx = 0; set_idx < NUM_SET; set_idx++)
   {
-    if (!evict_way_data(set_idx, way_idx)) {
-      failed_sets.push_back(set_idx);
+    auto [set_begin, set_end] = get_set_span_by_index(set_idx);
+    auto way = std::next(set_begin, way_idx);
+
+    if (!way->valid || !way->dirty) {
+      continue;
     }
-  }
-  if (!failed_sets.empty()) {
-    if (ErrorPageManager::get_instance().get_debug() == 1) {
-      fmt::print("[{}] Failed to allocate Way {} as Error Way for Sets: ", NAME, way_idx);
-      for (const auto& set_idx : failed_sets) {
-        fmt::print("{} ", set_idx);
-      }
-      fmt::print("\n");
-    }
-    return false;
-  }
 
-  error_way_count++;
-
-  // 각 Set마다 Error Way들의 last_used_cycles를 추적
-  if (error_way_last_used_cycles.empty()) {
-    error_way_last_used_cycles.resize(static_cast<std::size_t>(NUM_SET * max_error_way_limit), 0);
-  }
-
-  return true;
-}
-
-bool CACHE::evict_way_data(long set_idx, long way_idx)
-{
-  bool debug_mode = false; //hamoci: revise this for debug print
-  auto [set_begin, set_end] = get_set_span_by_index(set_idx);
-  auto way = std::next(set_begin, way_idx);
-
-  // 이미 invalid면 성공
-  if (!way->valid) {
-    return true;
-  }
-
-  // Eviction 발생 로그 출력
-  if (debug_mode) {
-    fmt::print("[{}] EVICT: Set {} Way {} - Address 0x{:x}{}\n", 
-              NAME, set_idx, way_idx, way->address.to<uint64_t>(),
-              way->dirty ? " (dirty, writeback needed)" : " (clean)");
-  }
-  // Dirty이면 writeback
-  if (way->dirty) {
     request_type writeback_packet;
     writeback_packet.cpu = cpu;
     writeback_packet.address = way->address;
@@ -1102,17 +1062,38 @@ bool CACHE::evict_way_data(long set_idx, long way_idx)
 
     auto success = lower_level->add_wq(writeback_packet);
     if (!success) {
-      fmt::print("[{}] EVICT_FAIL: Set {} Way {} - WQ full\n", NAME, set_idx, way_idx);
+      if (ErrorPageManager::get_instance().get_debug() == 1)
+        fmt::print("[{}] ALLOC_FAIL: Way {} writeback failed at Set {} - WQ full, aborting allocation\n", NAME, way_idx, set_idx);
       return false;
     }
+    way->dirty = false;  // writeback 완료 마킹 — 재시도 시 중복 writeback 방지
   }
 
-  way->valid = false;
-  way->dirty = false;
-  way->prefetch = false;
+  // Pass 2: 모든 writeback 성공 → 안전하게 invalidation
+  for (long set_idx = 0; set_idx < NUM_SET; set_idx++)
+  {
+    auto [set_begin, set_end] = get_set_span_by_index(set_idx);
+    auto way = std::next(set_begin, way_idx);
+
+    if (!way->valid) {
+      continue;
+    }
+
+    way->valid = false;
+    way->dirty = false;
+    way->prefetch = false;
+  }
+
+  error_way_count++;
+
+  // 각 Set마다 Error Way들의 last_used_cycles를 추적
+  if (error_way_last_used_cycles.empty()) {
+    error_way_last_used_cycles.resize(static_cast<std::size_t>(NUM_SET * max_error_way_limit), 0);
+  }
 
   return true;
 }
+
 
 auto CACHE::get_set_span_by_index(long set_idx)
     -> std::pair<set_type::iterator, set_type::iterator>

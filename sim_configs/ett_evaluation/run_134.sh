@@ -12,8 +12,6 @@ echo " Configs: ${TOTAL_CONFIGS}, Traces: ${#SPEC_TRACES[@]}"
 echo " Max parallel: ${MAX_PARALLEL}"
 echo "=========================================="
 
-run_experiment "1_error_rate_sweep" "1_error_rate_sweep"
-run_experiment "3_error_way_capacity" "3_error_way_capacity"
-run_experiment "4_llc_size_baseline" "4_llc_size_baseline"
+run_experiments_merged "1_error_rate_sweep" "3_error_way_capacity" "4_llc_size_baseline"
 
 echo "=== All (1+3+4) complete ==="
