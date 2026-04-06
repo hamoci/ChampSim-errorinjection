@@ -148,7 +148,7 @@ private:
 
 // Baseline Page Retirement (no pinning)
 private:
-    size_t baseline_retirement_threshold{6};  // retire (reset) page after this many errors
+    size_t baseline_retirement_threshold{1};  // retire (reset) page after this many errors
     std::unordered_map<uint64_t, uint32_t> baseline_page_error_counts;  // page_base → error count
     uint64_t stat_baseline_retirement_count{0};
 

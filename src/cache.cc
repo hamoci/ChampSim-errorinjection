@@ -1063,10 +1063,10 @@ bool CACHE::allocate_error_way(long way_idx)
     auto success = lower_level->add_wq(writeback_packet);
     if (!success) {
       if (ErrorPageManager::get_instance().get_debug() == 1)
-        fmt::print("[{}] ALLOC_FAIL: Way {} writeback failed at Set {} - WQ full, aborting allocation\n", NAME, way_idx, set_idx);
+        //fmt::print("[{}] ALLOC_FAIL: Way {} writeback failed at Set {} - WQ full, aborting allocation\n", NAME, way_idx, set_idx);
       return false;
     }
-    way->dirty = false;  // writeback 완료 마킹 — 재시도 시 중복 writeback 방지
+    way->dirty = false;
   }
 
   // Pass 2: 모든 writeback 성공 → 안전하게 invalidation
