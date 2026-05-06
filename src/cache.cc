@@ -183,7 +183,7 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
   long way_idx;
 
   auto& epm = ErrorPageManager::get_instance();
-  bool debug_mode = false; //Hamoci: for Debug Print
+  bool debug_mode = (epm.get_debug() == 1);
   if (epm.is_cache_pinning_enabled() && is_error_data(fill_mshr.address) && NAME == "LLC") {
     // Find Error Way
     auto [error_way, error_way_idx] = find_error_way(set_idx, set_begin, set_end);
@@ -192,8 +192,11 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
       stat_error_way_miss++;
       // Debug output
       if(debug_mode){
-        fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, Set: {}, Way: {}\n",
-                 fill_mshr.address.to<uint64_t>(), set_idx, error_way_idx);
+        fmt::print("[ERROR_WAY_ALLOC] Address: 0x{:x}, cl=0x{:x}, Set: {}, Way: {}, type={}\n",
+                 fill_mshr.address.to<uint64_t>(),
+                 fill_mshr.address.to<uint64_t>() & ~0x3FULL,
+                 set_idx, error_way_idx,
+                 access_type_names.at(champsim::to_underlying(fill_mshr.type)));
       }
       way = error_way;
       way_idx = error_way_idx;
@@ -202,6 +205,13 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
       return false;
     }
   } else {
+    if (debug_mode && NAME == "LLC" && epm.is_cache_pinning_enabled()) {
+      fmt::print("[NORMAL_WAY_FILL] Address: 0x{:x}, cl=0x{:x}, type={}, is_error={}\n",
+               fill_mshr.address.to<uint64_t>(),
+               fill_mshr.address.to<uint64_t>() & ~0x3FULL,
+               access_type_names.at(champsim::to_underlying(fill_mshr.type)),
+               is_error_data(fill_mshr.address) ? 1 : 0);
+    }
     // Find Normal Way
     auto [normal_way, normal_way_idx] = find_normal_way(fill_mshr, set_idx, set_begin);
     way = normal_way;
@@ -1264,16 +1274,7 @@ long CACHE::find_error_victim(long set_idx,
 bool CACHE::is_error_data(champsim::address addr) const
 {
   auto& epm = ErrorPageManager::get_instance();
-  uint64_t pa = addr.to<uint64_t>();
-  uint64_t page_base = pa & ~((1ULL << 21) - 1);
-
-  // Fast path: no errors on this page
-  if (epm.get_page_error_counter(page_base) == 0)
-    return false;
-
-  // Query ETT bloom filter
-  uint16_t cl_index = static_cast<uint16_t>((pa >> 6) & 0x7FFF);
-  return epm.ett_query(page_base, cl_index);
+  return epm.is_error_address(addr.to<uint64_t>());
 }
 
 long CACHE::get_normal_way_end() const
@@ -1376,10 +1377,94 @@ void CACHE::print_error_way_stats() const
   fmt::print("[LLC]   Error Way Fills (from DRAM):     {}\n", stat_error_way_miss);
   fmt::print("[LLC]   Error Way Hit Rate:              {:.2f}%\n", error_way_hit_rate);
   fmt::print("[LLC]   Error Way Evictions (LRU):       {}\n", stat_error_way_eviction);
+
+  // Protection coverage: how many known error addresses are pinned in error ways?
+  fmt::print("[LLC]\n");
+  fmt::print("[LLC] [Protection Coverage (end of sim)]\n");
+  {
+    uint64_t pinned_count = 0;
+    uint64_t in_normal_way = 0;
+    uint64_t not_in_llc = 0;
+    uint64_t total_error_addrs = 0;
+
+    // Collect all addresses currently in error ways
+    std::unordered_set<uint64_t> pinned_addrs;
+    for (long set_idx = 0; set_idx < NUM_SET; ++set_idx) {
+      for (long way_offset = 0; way_offset < error_way_count; ++way_offset) {
+        long way_idx = error_way_start + way_offset;
+        const auto& blk = block[set_idx * NUM_WAY + way_idx];
+        if (blk.valid) {
+          pinned_addrs.insert(blk.address.to<uint64_t>() & ~0x3FULL);
+        }
+      }
+    }
+
+    // Collect all addresses in normal ways
+    long normal_end = get_normal_way_end();
+    std::unordered_set<uint64_t> normal_addrs;
+    for (long set_idx = 0; set_idx < NUM_SET; ++set_idx) {
+      for (long way_idx = 0; way_idx < normal_end; ++way_idx) {
+        const auto& blk = block[set_idx * NUM_WAY + way_idx];
+        if (blk.valid) {
+          normal_addrs.insert(blk.address.to<uint64_t>() & ~0x3FULL);
+        }
+      }
+    }
+
+    const auto& error_addr_snapshot = epm.get_error_addresses();
+    total_error_addrs = error_addr_snapshot.size();
+
+    for (uint64_t addr : error_addr_snapshot) {
+      if (pinned_addrs.count(addr)) {
+        pinned_count++;
+      } else if (normal_addrs.count(addr)) {
+        in_normal_way++;
+      } else {
+        not_in_llc++;
+      }
+    }
+
+    double coverage = (total_error_addrs > 0)
+        ? (static_cast<double>(pinned_count) / static_cast<double>(total_error_addrs) * 100.0) : 0.0;
+
+    fmt::print("[LLC]   Total Known Error Addresses:     {}\n", total_error_addrs);
+    fmt::print("[LLC]   Pinned in Error Way:             {} ({:.2f}%)\n", pinned_count, coverage);
+    fmt::print("[LLC]   In Normal Way (unprotected):     {}\n", in_normal_way);
+    fmt::print("[LLC]   Not in LLC (DRAM exposed):       {}\n", not_in_llc);
+
+    // Debug dump: enumerate every valid error-way block and known-set membership
+    if (epm.get_debug() == 1) {
+      fmt::print("[LLC] [Debug] error-way valid block dump:\n");
+      uint64_t mismatch_in_eway = 0;
+      for (long set_idx = 0; set_idx < NUM_SET; ++set_idx) {
+        for (long way_offset = 0; way_offset < error_way_count; ++way_offset) {
+          long way_idx = error_way_start + way_offset;
+          const auto& blk = block[set_idx * NUM_WAY + way_idx];
+          if (!blk.valid) continue;
+          uint64_t cl = blk.address.to<uint64_t>() & ~0x3FULL;
+          bool known = error_addr_snapshot.count(cl) > 0;
+          fmt::print("[LLC]   eway set={} way={} addr=0x{:x} cl=0x{:x} known={} dirty={}\n",
+                     set_idx, way_idx, blk.address.to<uint64_t>(), cl, known ? 1 : 0, blk.dirty ? 1 : 0);
+          if (!known) mismatch_in_eway++;
+        }
+      }
+      fmt::print("[LLC] [Debug] error-way blocks NOT in error_addresses: {}\n", mismatch_in_eway);
+
+      fmt::print("[LLC] [Debug] error_addresses set dump (size={}):\n", error_addr_snapshot.size());
+      for (uint64_t addr : error_addr_snapshot) {
+        const char* loc;
+        if (pinned_addrs.count(addr)) loc = "ERROR_WAY";
+        else if (normal_addrs.count(addr)) loc = "NORMAL_WAY";
+        else loc = "NOT_IN_LLC";
+        fmt::print("[LLC]   known cl=0x{:x} location={}\n", addr, loc);
+      }
+    }
+  }
+
   fmt::print("[LLC] ============================================================\n");
 
-  // Print ETT statistics (only when pinning is enabled — reached here)
-  epm.print_ett_stats();
+  // Print error recording statistics (only when pinning is enabled — reached here)
+  epm.print_error_stats();
 }
 
 void CACHE::invalidate_page_error_ways(uint64_t page_base)
@@ -1391,10 +1476,41 @@ void CACHE::invalidate_page_error_ways(uint64_t page_base)
   int debug_mode = epm.get_debug();
 
   uint64_t page_mask = ~((1ULL << 21) - 1);  // 2MB mask
+
+  // Pass 1: dirty line writeback (WQ full 시 다음 cycle 재시도)
+  for (long set_idx = 0; set_idx < NUM_SET; set_idx++) {
+    auto [set_begin, set_end] = get_set_span_by_index(set_idx);
+    for (long way = error_start; way < NUM_WAY; way++) {
+      auto it = std::next(set_begin, way);
+      if (it->valid && it->dirty && (it->address.to<uint64_t>() & page_mask) == page_base) {
+        request_type writeback_packet;
+        writeback_packet.cpu = cpu;
+        writeback_packet.address = it->address;
+        writeback_packet.data = it->data;
+        writeback_packet.instr_id = 0;
+        writeback_packet.ip = champsim::address{};
+        writeback_packet.type = access_type::WRITE;
+        writeback_packet.pf_metadata = it->pf_metadata;
+        writeback_packet.response_requested = false;
+
+        auto success = lower_level->add_wq(writeback_packet);
+        if (!success) {
+          epm.requeue_retirement_page(page_base);
+          if (debug_mode == 1) {
+            fmt::print("[LLC_SWEEP] WQ full at set={} way={}, requeued page=0x{:x}\n",
+                       set_idx, way, page_base);
+          }
+          return;
+        }
+        it->dirty = false;
+      }
+    }
+  }
+
+  // Pass 2: all writebacks succeeded — invalidate
   long invalidated_count = 0;
   for (long set_idx = 0; set_idx < NUM_SET; set_idx++) {
     auto [set_begin, set_end] = get_set_span_by_index(set_idx);
-    // Only sweep error ways: [error_start, NUM_WAY)
     for (long way = error_start; way < NUM_WAY; way++) {
       auto it = std::next(set_begin, way);
       if (it->valid && (it->address.to<uint64_t>() & page_mask) == page_base) {
@@ -1402,7 +1518,7 @@ void CACHE::invalidate_page_error_ways(uint64_t page_base)
           fmt::print("[LLC_SWEEP] invalidate set={} way={} addr=0x{:x} (page=0x{:x})\n",
                      set_idx, way, it->address.to<uint64_t>(), page_base);
         }
-        it->valid = false;  // invalidate, no writeback needed
+        it->valid = false;
         invalidated_count++;
       }
     }
@@ -1413,5 +1529,6 @@ void CACHE::invalidate_page_error_ways(uint64_t page_base)
                page_base, invalidated_count, error_start, NUM_WAY);
   }
 }
+
 
 /* Hamoci Impl End */

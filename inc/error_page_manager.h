@@ -2,9 +2,9 @@
  * Error Page Manager for ChampSim
  * Manages error pages that require additional latency when accessed
  *
- * ETT (Error Tracking Table) with Bloom Filter:
+ * Error Address Tracking:
+ *   - Records exact error cache line addresses (set by MC CE detection)
  *   - Page Error Counter: page_base → error count (up to retirement_threshold)
- *   - ETT Entry: tag + bloom filter (m bits, H3 hash) per 2MB page
  *   - Page Retirement: retirement_threshold-th error → page offline emulation
  *
  * ECT (Error Counter Table): structure only, for paper completeness
@@ -36,34 +36,8 @@ enum class ErrorPageManagerMode {
 enum class ErrorRecordResult {
     FIRST_ERROR,      // first error on this page
     ADDED_ERROR,      // additional error recorded
-    ALREADY_KNOWN,    // already registered error position (bloom filter hit)
+    ALREADY_KNOWN,    // already registered error position
     PAGE_RETIRED,     // retirement threshold reached
-};
-
-// H3 Hash for bloom filter indexing
-// Uses random bit matrices for independent hash functions
-struct H3Hash {
-    int k{4};             // number of hash functions
-    int input_bits{15};   // cl_index is 15 bits
-    int output_bits{8};   // log2(bloom_filter_size)
-    // matrices[i][j] = random value for hash function i, input bit j
-    // Each hash output = XOR of matrices[i][j] for all set bits j in input
-    std::vector<std::vector<uint32_t>> matrices;  // [k][input_bits]
-
-    void init(int num_k, int bloom_size, uint64_t seed);
-    std::vector<int> hash(uint16_t cl_index) const;
-};
-
-// ETT Entry: one per 2MB page, holds bloom filter for error positions
-struct ETTEntry {
-    uint64_t tag{0};              // page base PA (2MB aligned)
-    std::vector<bool> bloom_filter; // m bits (configurable: 128/256/512)
-    uint64_t lru_counter{0};
-    bool valid{false};
-
-    void insert(uint16_t cl_index, const H3Hash& h3);
-    bool query(uint16_t cl_index, const H3Hash& h3) const;
-    void clear(size_t bloom_filter_size);
 };
 
 // ECT Entry: structure only (paper completeness)
@@ -83,18 +57,13 @@ private:
     champsim::chrono::clock::duration pte_error_latency_penalty{};
     static std::unique_ptr<ErrorPageManager> instance;
 
-// ETT (Error Tracking Table) with Bloom Filter
+// Error Address Tracking (replaces ETT bloom filter — exact tracking via MC CE_flag)
 private:
     // Page error counters: page_base → error count
     std::unordered_map<uint64_t, uint32_t> page_error_counters;
-    // ETT: configurable entries with bloom filters
-    size_t ett_num_entries{64};
-    size_t bloom_filter_size{256};  // m bits
-    size_t bloom_filter_k{4};      // number of hash functions
+    // Exact error addresses (cache-line aligned, set by MC CE detection)
+    std::unordered_set<uint64_t> error_addresses;
     size_t retirement_threshold{32};
-    std::vector<ETTEntry> ett;
-    uint64_t ett_lru_counter{0};
-    H3Hash h3_hash;
 
     // Pending LLC page retirements (page_base values)
     std::vector<uint64_t> pending_retirement_pages;
@@ -104,17 +73,12 @@ private:
     std::vector<ECTEntry> ect;  // 1024 entries default
     size_t ect_num_entries{1024};
 
-// ETT Statistics
+// Error Recording Statistics
 private:
     uint64_t stat_first_error_count{0};    // first error recordings
     uint64_t stat_added_error_count{0};    // additional error recordings
     uint64_t stat_retirement_count{0};     // pages retired
-    uint64_t stat_ett_eviction_count{0};   // ETT entry evictions
-    uint64_t stat_already_known_count{0};  // duplicate error accesses (bloom filter hit)
-
-    // Bloom filter occupancy tracking (cumulative)
-    uint64_t stat_bloom_bits_set_sum{0};   // sum of bits_set at each insert
-    uint64_t stat_bloom_insert_count{0};   // number of inserts
+    uint64_t stat_already_known_count{0};  // duplicate error accesses
 
     // Retirement detail
     uint64_t stat_retirement_invalidated_lines{0};  // total cache lines invalidated by retirement sweeps
@@ -161,7 +125,6 @@ public:
     static ErrorPageManager& get_instance() {
         if (!instance) {
             instance = std::make_unique<ErrorPageManager>();
-            instance->init_ett();
         }
         return *instance;
     }
@@ -178,18 +141,20 @@ public:
     bool is_error_page(champsim::page_number page) const { return error_pages.find(page.to<uint64_t>()) != error_pages.end(); }
 
     // ============================================================
-    // ETT (Error Tracking Table) API
+    // Error Recording API (MC CE_flag based — no bloom filter)
     // ============================================================
 
     // Record a new error at physical address (64B aligned).
     // Returns the result indicating which case was triggered.
     ErrorRecordResult record_error(uint64_t pa);
 
-    // Check if the given physical address is an error position via bloom filter
-    bool is_error_position(uint64_t pa) const;
+    // Check if the given physical address is a known error address
+    bool is_error_address(uint64_t pa) const {
+        return error_addresses.count(pa & ~0x3FULL) > 0;  // cache-line aligned
+    }
 
-    // Query ETT bloom filter: page_base + cl_index
-    bool ett_query(uint64_t page_base, uint16_t cl_index) const;
+    // Get snapshot of all known error addresses (for protection coverage stats)
+    const std::unordered_set<uint64_t>& get_error_addresses() const { return error_addresses; }
 
     // Get page error counter (0 if not tracked)
     uint32_t get_page_error_counter(uint64_t page_base) const {
@@ -204,42 +169,22 @@ public:
         return result;
     }
     bool has_pending_retirements() const { return !pending_retirement_pages.empty(); }
+    void requeue_retirement_page(uint64_t page_base) { pending_retirement_pages.push_back(page_base); }
 
     // Get number of tracked error pages
     size_t get_error_page_counter_count() const { return page_error_counters.size(); }
-    void clear_all_ett() {
-        page_error_counters.clear();
-        for (auto& e : ett) e.valid = false;
-    }
 
-    // ETT configuration setters (must be called before simulation starts)
-    void set_ett_num_entries(size_t entries) {
-        ett_num_entries = entries;
-        init_ett();
-    }
-    void set_bloom_filter_size(size_t size) {
-        bloom_filter_size = size;
-        init_ett();
-    }
-    void set_bloom_filter_k(size_t k) {
-        bloom_filter_k = k;
-        init_ett();
-    }
+    // Configuration
     void set_retirement_threshold(size_t threshold) { retirement_threshold = threshold; }
-    size_t get_ett_num_entries() const { return ett_num_entries; }
-    size_t get_bloom_filter_size() const { return bloom_filter_size; }
-    size_t get_bloom_filter_k() const { return bloom_filter_k; }
     size_t get_retirement_threshold() const { return retirement_threshold; }
 
-    // ETT statistics
+    // Statistics
     uint64_t get_stat_first_error_count() const { return stat_first_error_count; }
     uint64_t get_stat_added_error_count() const { return stat_added_error_count; }
     uint64_t get_stat_retirement_count() const { return stat_retirement_count; }
-    uint64_t get_stat_ett_eviction_count() const { return stat_ett_eviction_count; }
     uint64_t get_stat_already_known_count() const { return stat_already_known_count; }
     void add_retirement_invalidated_lines(uint64_t count) { stat_retirement_invalidated_lines += count; }
-    size_t get_ett_used_entries() const;
-    void print_ett_stats() const;
+    void print_error_stats() const;
 
     // ============================================================
     // Existing API (unchanged)
@@ -385,21 +330,15 @@ public:
     void print_error_pages() const;
 
 private:
-    // Initialize ETT and H3 hash
-    void init_ett();
-
-    // Internal ETT helpers
-    int find_ett_entry(uint64_t page_base_pa) const;
-    int allocate_ett_entry(uint64_t page_base_pa);
-    int evict_ett_lru();
-    void retire_page(uint64_t page_base, int ett_idx);
-    static uint16_t extract_cache_line_index(uint64_t pa) {
-        // PA[20:6] → 15-bit cache line index within a 2MB page
-        return static_cast<uint16_t>((pa >> 6) & 0x7FFF);
-    }
+    // Internal helpers
+    void retire_page(uint64_t page_base);
     static uint64_t get_page_base_pa(uint64_t pa) {
         // 2MB aligned: clear lower 21 bits
         return pa & ~((1ULL << 21) - 1);
+    }
+    static uint64_t get_cache_line_addr(uint64_t pa) {
+        // Cache-line aligned: clear lower 6 bits
+        return pa & ~0x3FULL;
     }
 };
 
