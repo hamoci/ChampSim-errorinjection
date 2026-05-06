@@ -385,7 +385,11 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       auto error_latency = champsim::chrono::clock::duration{};
 
       // CYCLE mode: Consume error from counter
-      if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE &&
+      // Only inject on read paths (RQ): writebacks (WQ, type==WRITE) don't fill into LLC,
+      // so recording an error there leaves the line DRAM-exposed instead of pinned.
+      // Skipping WRITE keeps the pending error in the counter until the next read services it.
+      if (pkt->value().type != access_type::WRITE &&
+               ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE &&
                ErrorPageManager::get_instance().consume_cycle_error()) {
         auto& epm = ErrorPageManager::get_instance();
         uint64_t raw_pa = pkt->value().address.to<uint64_t>();
