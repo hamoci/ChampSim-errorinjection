@@ -78,17 +78,20 @@ void ErrorPageManager::retire_page(uint64_t page_base) {
         fmt::print("[ERROR_REC]   RETIRE page=0x{:x}:\n", page_base);
     }
 
-    // 1. Remove page error counter
+    // 1. Remove page error counters (both pinning ON and baseline paths)
     page_error_counters.erase(page_base);
+    baseline_page_error_counts.erase(page_base);
     if (debug == 1) {
         fmt::print("[ERROR_REC]     1. page_error_counters: erased\n");
     }
 
-    // 2. Remove error addresses belonging to this page
+    // 2. Move error addresses of this page from error_addresses → retired_error_addresses
+    //    (set-based, unique-cl semantics; bounded by working set so snapshot is time-stable)
     uint64_t page_mask = ~((1ULL << 21) - 1);
     size_t removed = 0;
     for (auto it = error_addresses.begin(); it != error_addresses.end(); ) {
         if ((*it & page_mask) == page_base) {
+            retired_error_addresses.insert(*it);
             it = error_addresses.erase(it);
             removed++;
         } else {
@@ -96,7 +99,8 @@ void ErrorPageManager::retire_page(uint64_t page_base) {
         }
     }
     if (debug == 1) {
-        fmt::print("[ERROR_REC]     2. error_addresses: removed {} entries\n", removed);
+        fmt::print("[ERROR_REC]     2. error_addresses: removed {} entries (retired_set size now {})\n",
+                   removed, retired_error_addresses.size());
     }
 
     // 3. Queue page for LLC error way sweep
@@ -105,6 +109,29 @@ void ErrorPageManager::retire_page(uint64_t page_base) {
         fmt::print("[ERROR_REC]     3. pending_retirement_pages: queued (total pending={})\n",
                    pending_retirement_pages.size());
     }
+}
+
+bool ErrorPageManager::record_baseline_error(uint64_t pa) {
+    uint64_t page_base = get_page_base_pa(pa);
+    uint64_t cl_addr   = get_cache_line_addr(pa);
+
+    // Snapshot tracking for baseline Protection Coverage (unique cl_addr).
+    // Duplicate cl_addr inserts are natural no-ops via set semantics.
+    error_addresses.insert(cl_addr);
+
+    auto& count = baseline_page_error_counts[page_base];
+    count++;
+    if (count >= baseline_retirement_threshold) {
+        retire_page(page_base);                 // moves cl_addrs to retired_error_addresses,
+                                                // erases counter, queues LLC sweep (no-op when no error ways)
+        stat_baseline_retirement_count++;
+        if (debug == 1) {
+            fmt::print("[BASELINE_RETIRE] page=0x{:x} retired (threshold={}) pa=0x{:x}\n",
+                       page_base, baseline_retirement_threshold, pa);
+        }
+        return true;
+    }
+    return false;
 }
 
 void ErrorPageManager::print_error_stats() const {

@@ -1325,9 +1325,24 @@ long CACHE::get_max_error_way_limit() const
 void CACHE::print_error_way_stats() const
 {
   auto& epm = ErrorPageManager::get_instance();
-  
-  // LLC이고 Cache Pinning이 활성화되어 있을 때만 출력
-  if (NAME != "LLC" || !epm.is_cache_pinning_enabled() || error_way_count == 0) {
+
+  if (NAME != "LLC") return;
+
+  // Baseline Protection Coverage (Pinning OFF): retired / total known
+  // Snapshot-only; bounded by working set so time-stable.
+  if (!epm.is_cache_pinning_enabled() || error_way_count == 0) {
+    const auto& retired_snap = epm.get_retired_error_addresses();
+    const auto& live_snap    = epm.get_error_addresses();
+    size_t retired_n = retired_snap.size();
+    size_t live_n    = live_snap.size();
+    size_t total     = retired_n + live_n;
+    double coverage  = (total > 0) ? (100.0 * static_cast<double>(retired_n) / static_cast<double>(total)) : 0.0;
+
+    fmt::print("\n[LLC] ========== Baseline Protection Coverage ==========\n");
+    fmt::print("[LLC]   Total Known Error Addresses:    {}\n", total);
+    fmt::print("[LLC]   Retired (page offline):         {} ({:.2f}%)\n", retired_n, coverage);
+    fmt::print("[LLC]   Live (still tracked):           {}\n", live_n);
+    fmt::print("[LLC] ==================================================\n");
     return;
   }
 

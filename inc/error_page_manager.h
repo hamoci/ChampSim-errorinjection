@@ -63,6 +63,10 @@ private:
     std::unordered_map<uint64_t, uint32_t> page_error_counters;
     // Exact error addresses (cache-line aligned, set by MC CE detection)
     std::unordered_set<uint64_t> error_addresses;
+    // Cache-line addresses that were removed from error_addresses by page retirement.
+    // Unique-cl semantics: same PA retiring multiple times still counts as one entry.
+    // Used by baseline Protection Coverage metric (snapshot, working-set bounded).
+    std::unordered_set<uint64_t> retired_error_addresses;
     size_t retirement_threshold{32};
 
     // Pending LLC page retirements (page_base values)
@@ -156,6 +160,10 @@ public:
     // Get snapshot of all known error addresses (for protection coverage stats)
     const std::unordered_set<uint64_t>& get_error_addresses() const { return error_addresses; }
 
+    // Snapshot of cl_addrs that left error_addresses via page retirement (unique).
+    const std::unordered_set<uint64_t>& get_retired_error_addresses() const { return retired_error_addresses; }
+    size_t get_retired_error_address_count() const { return retired_error_addresses.size(); }
+
     // Get page error counter (0 if not tracked)
     uint32_t get_page_error_counter(uint64_t page_base) const {
         auto it = page_error_counters.find(page_base);
@@ -246,22 +254,10 @@ public:
     void set_baseline_retirement_threshold(size_t threshold) { baseline_retirement_threshold = threshold; }
     size_t get_baseline_retirement_threshold() const { return baseline_retirement_threshold; }
 
-    // Baseline page retirement: returns true if this error triggers retirement
-    bool record_baseline_error(uint64_t pa) {
-        uint64_t page_base = get_page_base_pa(pa);
-        auto& count = baseline_page_error_counts[page_base];
-        count++;
-        if (count >= baseline_retirement_threshold) {
-            count = 0;  // reset — emulate new page allocation
-            stat_baseline_retirement_count++;
-            if (debug == 1) {
-                fmt::print("[BASELINE_RETIRE] page=0x{:x} retired (threshold={}) pa=0x{:x}\n",
-                           page_base, baseline_retirement_threshold, pa);
-            }
-            return true;
-        }
-        return false;
-    }
+    // Baseline page retirement: returns true if this error triggers retirement.
+    // Tracks cl_addr in error_addresses (for snapshot Protection Coverage metric)
+    // and delegates to shared retire_page() helper on threshold hit.
+    bool record_baseline_error(uint64_t pa);
     uint64_t get_stat_baseline_retirement_count() const { return stat_baseline_retirement_count; }
 
     // Update cycle error counter (called from operate() every cycle)
