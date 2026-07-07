@@ -2,12 +2,14 @@
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SCRIPT_DIR)
-RESULTS_DIR = os.path.join(BASE_DIR, "results/0219_finished/real_final_spec")
+RESULTS_DIR_SPEC = os.path.join(BASE_DIR, "results/0219_finished/real_final_spec")
+RESULTS_DIR_GAP = os.path.join(BASE_DIR, "results/0219_finished/real_final_gap")
+RESULTS_DIRS = (RESULTS_DIR_SPEC, RESULTS_DIR_GAP)
 
 FILE_RE = re.compile(
     r"^champsim_(?:(?P<llc>[248])mb_)?(?P<page>4kb|2mb)_(?:(?:error_32gb_(?P<er>1e-\d+)(?P<pin>_cache_pinning)?)|32gb)_(?P<trace>.+)\.txt$"
@@ -22,6 +24,7 @@ USED_RE = re.compile(r"Used Error Way Slots:\s+\d+\s+\(([\d.]+)%\)")
 class Record:
     path: str
     filename: str
+    suite: str
     llc_mb: int
     page: str
     error_rate: Optional[str]
@@ -48,6 +51,7 @@ def parse_filename(filename: str) -> Optional[Record]:
     return Record(
         path="",
         filename=filename,
+        suite="unknown",
         llc_mb=llc_mb,
         page=page,
         error_rate=er,
@@ -57,20 +61,36 @@ def parse_filename(filename: str) -> Optional[Record]:
     )
 
 
-def load_records(results_dir: str = RESULTS_DIR) -> List[Record]:
-    records: List[Record] = []
-    if not os.path.isdir(results_dir):
-        return records
+def _suite_from_path(path: str) -> str:
+    if "real_final_spec" in path:
+        return "SPEC"
+    if "real_final_gap" in path:
+        return "GAP"
+    return "UNKNOWN"
 
-    for root, _, files in os.walk(results_dir):
-        for filename in files:
-            if not filename.endswith(".txt"):
-                continue
-            rec = parse_filename(filename)
-            if rec is None:
-                continue
-            rec.path = os.path.join(root, filename)
-            records.append(rec)
+
+def load_records(results_dir: Union[str, Sequence[str], None] = None) -> List[Record]:
+    records: List[Record] = []
+    if results_dir is None:
+        dirs = list(RESULTS_DIRS)
+    elif isinstance(results_dir, str):
+        dirs = [results_dir]
+    else:
+        dirs = list(results_dir)
+
+    for one_dir in dirs:
+        if not os.path.isdir(one_dir):
+            continue
+        for root, _, files in os.walk(one_dir):
+            for filename in files:
+                if not filename.endswith(".txt"):
+                    continue
+                rec = parse_filename(filename)
+                if rec is None:
+                    continue
+                rec.path = os.path.join(root, filename)
+                rec.suite = _suite_from_path(rec.path)
+                records.append(rec)
 
     return records
 

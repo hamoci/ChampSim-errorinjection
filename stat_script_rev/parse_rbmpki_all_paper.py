@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RBMPKI + IPC parsing for real_final_spec results."""
+"""RBMPKI + IPC parsing for real_final_{spec,gap} results."""
 
 import os
 import re
@@ -42,7 +42,7 @@ def main():
         if ipc is None:
             continue
         rows.append({
-            "Category": "SPEC",
+            "Category": r.suite,
             "Workload": r.workload,
             "Page_Size": r.page.upper(),
             "IPC": ipc,
@@ -95,10 +95,17 @@ def main():
     plt.savefig(OUT_RANK, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.close()
 
-    # category chart (SPEC only in this dataset)
-    avg = float(np.mean(r_vals)) if r_vals else 0.0
+    # category chart
+    cat_avgs = []
+    for cat in sorted({r["Category"] for r in valid}):
+        cat_vals = [r["RBMPKI"] for r in valid if r["Category"] == cat]
+        if cat_vals:
+            cat_avgs.append((cat, float(np.mean(cat_vals))))
+
+    labels = [x[0] for x in cat_avgs]
+    vals = [x[1] for x in cat_avgs]
     plt.figure(figsize=(4.5, 3))
-    plt.bar(["SPEC"], [avg], color="#2ECC71", alpha=0.85, edgecolor="black", linewidth=0.8)
+    plt.bar(labels, vals, color="#2ECC71", alpha=0.85, edgecolor="black", linewidth=0.8)
     plt.ylabel("Average RBMPKI", fontsize=8)
     plt.grid(axis='y', linestyle='--', alpha=0.5, linewidth=0.5)
     plt.tight_layout(pad=0.3)
