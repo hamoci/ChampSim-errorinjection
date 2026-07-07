@@ -9,7 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Error cycle interval mapping
 INTERVAL_MAP = {
-    "1e-5": 1440000000,
+    "1e-5": 144000000,
     "1e-6": 14400000,
     "1e-7": 1440000,
     "1e-8": 144000,
@@ -132,6 +132,7 @@ EPM_PINNING_OFF = {
     "cache_pinning": False,
     "dynamic_error_latency": False,
     "error_latency_penalty": 454568,
+    "baseline_retirement_threshold": 1,
     "debug": 0
 }
 
@@ -181,8 +182,8 @@ def gen_2_ett_sensitivity():
     """Experiment 2: ETT sensitivity x all error rates"""
     print("\n=== 2. ETT Sensitivity ===")
     for rate_name, interval in INTERVAL_MAP.items():
-        # 2a. ETT entries sweep: 32, 64, 128(baseline), 256
-        for entries in [32, 64, 128, 256]:
+        # 2a. ETT entries sweep: 1, 4, 8, 16, 32, 64, 128(baseline), 256
+        for entries in [1, 4, 8, 16, 32, 64, 128, 256]:
             epm = copy.deepcopy(EPM_PINNING_ON)
             epm["error_cycle_interval"] = interval
             epm["ett_entries"] = entries
@@ -192,7 +193,7 @@ def gen_2_ett_sensitivity():
                                 f"entries_{entries}_{rate_name}.json")
             write_config(path, cfg)
 
-        # 2b. Retirement threshold sweep: 4, 8, 16, 32
+        # 2b. Retirement threshold sweep (pinning ON): 4, 8, 16, 32
         for threshold in [4, 8, 16, 32]:
             epm = copy.deepcopy(EPM_PINNING_ON)
             epm["error_cycle_interval"] = interval
@@ -200,6 +201,17 @@ def gen_2_ett_sensitivity():
             exe = f"ett_sens_retire_{threshold}_{rate_name}"
             cfg = make_config(exe, epm=epm)
             path = os.path.join(BASE_DIR, "2_ett_sensitivity", "retirement_threshold",
+                                f"threshold_{threshold}_{rate_name}.json")
+            write_config(path, cfg)
+
+        # 2c. Retirement threshold sweep (pinning OFF): 2, 4, 8, 16, 32
+        for threshold in [2, 4, 8, 16, 32]:
+            epm = copy.deepcopy(EPM_PINNING_OFF)
+            epm["error_cycle_interval"] = interval
+            epm["baseline_retirement_threshold"] = threshold
+            exe = f"ett_sens_retire_off_{threshold}_{rate_name}"
+            cfg = make_config(exe, epm=epm)
+            path = os.path.join(BASE_DIR, "2_ett_sensitivity", "retirement_threshold_pinning_off",
                                 f"threshold_{threshold}_{rate_name}.json")
             write_config(path, cfg)
 
@@ -236,9 +248,56 @@ def gen_4_llc_size_baseline():
         write_config(path, cfg)
 
 
+def gen_5_llc_size_sensitivity():
+    """Experiment 5: LLC size sweep with pinning ON, max_error_ways=8, x all error rates"""
+    print("\n=== 5. LLC Size Sensitivity (pinning ON, max_error_ways=8) ===")
+    llc_configs = [
+        ("1MB", 2048, 8),
+        ("2MB", 2048, 16),
+        ("4MB", 4096, 16),
+        ("8MB", 2048, 64),
+    ]
+    for rate_name, interval in INTERVAL_MAP.items():
+        for size_name, sets, ways in llc_configs:
+            epm = copy.deepcopy(EPM_PINNING_ON)
+            epm["error_cycle_interval"] = interval
+            epm["max_error_ways_per_set"] = 8
+            exe = f"ett_llc_size_{size_name}_{rate_name}"
+            cfg = make_config(exe, llc_sets=sets, llc_ways=ways, epm=epm)
+            path = os.path.join(BASE_DIR, "5_llc_size_sensitivity",
+                                f"LLC_{size_name}_{rate_name}.json")
+            write_config(path, cfg)
+
+
+def gen_6_combined_sweep():
+    """Experiment 6: Combined sweep — ett_entries x retirement_threshold x max_error_ways x error_rate"""
+    print("\n=== 6. Combined Sweep (ETT entries x Threshold x Max Ways) ===")
+    ett_entries_list = [16, 64, 128]
+    threshold_list = [4, 16, 32]
+    max_ways_list = [2, 4, 8]
+
+    for rate_name, interval in INTERVAL_MAP.items():
+        for entries in ett_entries_list:
+            for threshold in threshold_list:
+                for ways in max_ways_list:
+                    epm = copy.deepcopy(EPM_PINNING_ON)
+                    epm["error_cycle_interval"] = interval
+                    epm["ett_entries"] = entries
+                    epm["retirement_threshold"] = threshold
+                    epm["max_error_ways_per_set"] = ways
+                    exe = f"comb_e{entries}_t{threshold}_w{ways}_{rate_name}"
+                    cfg = make_config(exe, epm=epm)
+                    path = os.path.join(
+                        BASE_DIR, "6_combined_sweep", f"e{entries}",
+                        f"e{entries}_t{threshold}_w{ways}_{rate_name}.json")
+                    write_config(path, cfg)
+
+
 if __name__ == "__main__":
     gen_1_error_rate_sweep()
     gen_2_ett_sensitivity()
     gen_3_error_way_capacity()
     gen_4_llc_size_baseline()
+    gen_5_llc_size_sensitivity()
+    gen_6_combined_sweep()
     print("\nDone! All configs generated.")

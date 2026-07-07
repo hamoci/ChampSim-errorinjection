@@ -38,6 +38,15 @@ fi
 if [[ "${FILTER}" == "all" || "${FILTER}" == "2" ]]; then
   build_configs "2_retirement_threshold"
 fi
+if [[ "${FILTER}" == "2-only32" ]]; then
+  build_configs "2_retirement_threshold_only32"
+fi
+if [[ "${FILTER}" == "2-only2" ]]; then
+  build_configs "2_retirement_threshold_only2"
+fi
+if [[ "${FILTER}" == "2-4-8-16" ]]; then
+  build_configs "2_retirement_threshold_4_8_16"
+fi
 if [[ "${FILTER}" == "all" || "${FILTER}" == "3" ]]; then
   build_configs "3_error_way_capacity"
 fi

@@ -197,7 +197,7 @@ def gen_2_retirement_threshold():
     print("\n=== 2. Retirement Threshold Sensitivity ===")
     for rate_name, interval in INTERVAL_MAP.items():
         # Pinning ON: threshold sweep
-        for threshold in [2, 4, 8, 16, 32]:
+        for threshold in [2, 4, 8, 16, 32, 256]:
             epm = copy.deepcopy(EPM_PINNING_ON)
             epm["error_cycle_interval"] = interval
             epm["retirement_threshold"] = threshold
@@ -208,7 +208,7 @@ def gen_2_retirement_threshold():
             write_config(path, cfg)
 
         # Pinning OFF: baseline_retirement_threshold sweep
-        for threshold in [2, 4, 8, 16, 32]:
+        for threshold in [2, 4, 8, 16, 32, 256]:
             epm = copy.deepcopy(EPM_PINNING_OFF)
             epm["error_cycle_interval"] = interval
             epm["baseline_retirement_threshold"] = threshold

@@ -178,6 +178,7 @@
     "cache_pinning": false,
     "dynamic_error_latency": false,
     "error_latency_penalty": 454568,
+    "baseline_retirement_threshold": 1,
     "debug": 0,
     "error_cycle_interval": 1440000
   }

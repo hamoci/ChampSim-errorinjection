@@ -39,6 +39,22 @@ fi
 if [[ "${FILTER}" == "all" || "${FILTER}" == "4" ]]; then
   build_configs "4_llc_size_baseline"
 fi
+if [[ "${FILTER}" == "all" || "${FILTER}" == "5" ]]; then
+  build_configs "5_llc_size_sensitivity"
+fi
+if [[ "${FILTER}" == "all" || "${FILTER}" == "6" ]]; then
+  build_configs "6_combined_sweep"
+fi
+# Build individual parts of experiment 6
+if [[ "${FILTER}" == "6a" ]]; then
+  build_configs "6_combined_sweep/e16"
+fi
+if [[ "${FILTER}" == "6b" ]]; then
+  build_configs "6_combined_sweep/e64"
+fi
+if [[ "${FILTER}" == "6c" ]]; then
+  build_configs "6_combined_sweep/e128"
+fi
 
 echo ""
 echo "Build complete."

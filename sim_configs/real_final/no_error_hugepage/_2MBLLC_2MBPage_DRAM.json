@@ -176,6 +176,7 @@
   "error_page_manager": {
     "mode": "OFF",
     "cache_pinning": false,
-    "dynamic_error_latency": false
+    "dynamic_error_latency": false,
+    "error_latency_penalty": 454568
   }
 }

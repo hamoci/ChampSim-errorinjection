@@ -184,6 +184,6 @@
     "retirement_threshold": 32,
     "max_error_ways_per_set": 8,
     "debug": 0,
-    "error_cycle_interval": 1440000000
+    "error_cycle_interval": 144000000
   }
 }

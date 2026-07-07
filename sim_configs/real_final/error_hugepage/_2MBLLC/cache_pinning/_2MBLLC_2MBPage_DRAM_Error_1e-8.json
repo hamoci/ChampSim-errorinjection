@@ -175,10 +175,9 @@
   },
   "error_page_manager": {
     "mode": "CYCLE",
-    "error_latency_penalty": 800,
     "error_cycle_interval": 144000,
     "cache_pinning": true,
-    "pte_error_latency_penalty": 600,
-    "dynamic_error_latency": true
+    "dynamic_error_latency": true,
+    "error_latency_penalty": 454568
   }
 }
