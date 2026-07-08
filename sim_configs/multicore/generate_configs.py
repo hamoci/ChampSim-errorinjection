@@ -27,6 +27,7 @@ NUM_CORES = 4
 INTERVAL_MAP = {
     "1e-6": 14400000,
     "1e-7": 1440000,
+    "1e-8": 144000,
 }
 
 # Base template: identical to single-core template except num_cores and LLC size.

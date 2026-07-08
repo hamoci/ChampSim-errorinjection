@@ -1,6 +1,7 @@
 #!/bin/bash
-# Track A: 4-core SPEC mix experiment
-#   10 mixes x 5 binaries (noerr, off/pin x 1e-6/1e-7) = 50 runs
+# Multicore Experiment 1: error rate sweep (4-core SPEC mixes)
+#   10 mixes x 7 binaries (noerr + off/pin x {1e-6,1e-7,1e-8}) = 70 runs
+#   (mirrors single-core 1_error_rate_sweep; groups 2/6/7 have their own scripts)
 #
 # Mix composition (SPEC CPU 2017 only, 2MB-page RBMPKI ranking from
 # stat_script_rev/baseline_workloads_rbmpki_ipc.csv):
@@ -10,26 +11,34 @@
 #   H1-H2: 2 mem + 2 cpu hybrids
 #
 # Usage:
-#   MAX_PARALLEL=4 ./run_mixes.sh           # all runs
-#   MAX_PARALLEL=4 ./run_mixes.sh M1 C2 H1  # selected mixes only
-#   WARMUP/SIM env-overridable (default 50M/250M per core, per paper outline)
+#   MAX_PARALLEL=38 ./run_mixes.sh           # all runs
+#   MAX_PARALLEL=38 ./run_mixes.sh M1 C2 H1  # selected mixes only
+#   Env overrides:
+#     WARMUP/SIM   : instructions per core (default 50M/250M)
+#     RESULT_DIR   : output dir (default results/multicore/1_error_rate_sweep)
+#     RUN_TIMEOUT  : per-run wall-clock limit, e.g. 36h / 129600 (default: none).
+#                    A timed-out run is logged FAIL and will be retried on the
+#                    next invocation (no "Simulation complete" marker).
 set -euo pipefail
 
 CHAMPSIM_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 TRACE_DIR="${TRACE_DIR:-${CHAMPSIM_DIR}/test_traces}"
-RESULT_DIR="${RESULT_DIR:-${CHAMPSIM_DIR}/results/multicore/1_headline}"
+RESULT_DIR="${RESULT_DIR:-${CHAMPSIM_DIR}/results/multicore/1_error_rate_sweep}"
 LOG_FILE="${RESULT_DIR}/run_mixes.log"
 
 WARMUP="${WARMUP:-50000000}"
 SIM="${SIM:-250000000}"
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
+RUN_TIMEOUT="${RUN_TIMEOUT:-}"
 
 BINARIES=(
   champsim_4core_8mb_noerr
   champsim_4core_8mb_off_1e-6
   champsim_4core_8mb_off_1e-7
+  champsim_4core_8mb_off_1e-8
   champsim_4core_8mb_pin_1e-6
   champsim_4core_8mb_pin_1e-7
+  champsim_4core_8mb_pin_1e-8
 )
 
 # SPEC trace filenames
@@ -70,6 +79,11 @@ log_msg() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"
 }
 
+fmt_elapsed() {
+  local s=$1
+  printf "%d:%02d:%02d" $((s / 3600)) $((s % 3600 / 60)) $((s % 60))
+}
+
 wait_for_slot() {
   while true; do
     local alive=0
@@ -88,7 +102,7 @@ else
   SELECTED=("${MIX_ORDER[@]}")
 fi
 
-log_msg "=== Track A: 4-core SPEC mixes | warmup=${WARMUP} sim=${SIM} parallel=${MAX_PARALLEL} ==="
+log_msg "=== Exp 1: 4-core error rate sweep | warmup=${WARMUP} sim=${SIM} parallel=${MAX_PARALLEL} timeout=${RUN_TIMEOUT:-none} ==="
 
 PIDS=()
 total=0
@@ -126,15 +140,27 @@ for mix in "${SELECTED[@]}"; do
     log_msg "START [${total}]: ${binary} x ${mix} (${MIXES[$mix]})"
 
     (
-      "${CHAMPSIM_DIR}/bin/${binary}" \
-        --warmup-instructions "${WARMUP}" \
-        --simulation-instructions "${SIM}" \
-        "${traces[@]}" > "${out}" 2>&1
-      ec=$?
-      if [[ ${ec} -eq 0 ]] && grep -q "Simulation complete" "${out}" 2>/dev/null; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] DONE : ${binary} x ${mix}" >> "${LOG_FILE}"
+      t0=$(date +%s)
+      ec=0
+      if [[ -n "${RUN_TIMEOUT}" ]]; then
+        timeout "${RUN_TIMEOUT}" "${CHAMPSIM_DIR}/bin/${binary}" \
+          --warmup-instructions "${WARMUP}" \
+          --simulation-instructions "${SIM}" \
+          "${traces[@]}" > "${out}" 2>&1 || ec=$?
       else
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] FAIL : ${binary} x ${mix} (exit=${ec})" >> "${LOG_FILE}"
+        "${CHAMPSIM_DIR}/bin/${binary}" \
+          --warmup-instructions "${WARMUP}" \
+          --simulation-instructions "${SIM}" \
+          "${traces[@]}" > "${out}" 2>&1 || ec=$?
+      fi
+      t1=$(date +%s)
+      elapsed=$((t1 - t0))
+      if [[ ${ec} -eq 0 ]] && grep -q "Simulation complete" "${out}" 2>/dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] DONE : ${binary} x ${mix} elapsed=${elapsed}s ($(fmt_elapsed ${elapsed}))" >> "${LOG_FILE}"
+      elif [[ ${ec} -eq 124 ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] FAIL : ${binary} x ${mix} elapsed=${elapsed}s ($(fmt_elapsed ${elapsed})) TIMEOUT" >> "${LOG_FILE}"
+      else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] FAIL : ${binary} x ${mix} elapsed=${elapsed}s ($(fmt_elapsed ${elapsed})) exit=${ec}" >> "${LOG_FILE}"
       fi
     ) &
     PIDS+=($!)

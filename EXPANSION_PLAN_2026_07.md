@@ -49,9 +49,13 @@
   - memory pool: mcf(21.4) fotonik3d(21.0) gcc(17.8) bwaves(16.3) omnetpp(13.3) → M1~M4 (leave-one-out)
   - cpu pool: cactuBSSN(8.1) wrf(6.1) roms(5.0) pop2(4.5) xalancbmk(2.8) → C1~C4 (leave-one-out)
   - hybrid: H1(mcf fotonik3d xalancbmk pop2), H2(gcc omnetpp wrf roms)
-- [ ] **A-2. 실행 매트릭스**: 10 mix × 5 binary(noerr, off/pin × 1e-6/1e-7) = **50 runs**
-  - `sim_configs/multicore/run_mixes.sh` (skip-if-done, MAX_PARALLEL, WARMUP/SIM/RESULT_DIR env-override) — tiny run으로 5/5 DONE 검증 완료
-  - 기본 warmup 50M + sim 250M per core (아웃라인 설정). 예상 소요: run당 ~10-15h → MAX_PARALLEL=4 기준 약 5-6일, 8 기준 약 3일
+- [ ] **A-2. 실행 매트릭스** — 싱글코어와 동일한 실험 번호 체계로 구성 (2026-07-08 결정, Tier 구분 폐기):
+  - **Exp 1 (error rate sweep)**: 10 mix × 7 binary(noerr + off/pin × {1e-6,1e-7,1e-8}) = **70 runs** → `results/multicore/1_error_rate_sweep/`
+    - `sim_configs/multicore/run_mixes.sh` — DONE/FAIL 라인에 elapsed 초 기록, RUN_TIMEOUT env(1e-8 무한 run 대비), skip-if-done
+    - 1e-8(=1e8 errors/hour stress)에서 conventional off는 일부 mix가 사실상 안 끝날 수 있음(아웃라인 Fig10에서 panic 제외한 것과 동일 현상) — RUN_TIMEOUT으로 자르고 결과에는 미완료 표기
+  - **Exp 2' (retirement threshold)** / **Exp 6' (max errway sweep)** / **Exp 7' (no-error way sweep)**: 대표 mix(M1/C1/H1)만, config/스크립트는 Exp1 결과 확인 후 작성 → `results/multicore/{2_retirement_threshold,6_llc_way_sweep,7_no_error_way_sweep}/`
+  - **검증 완료 (2026-07-08)**: raw_data.xlsx 파이프라인은 baseline을 별도로 받지 않고 "Way sweep in No error" 시트의 2MB/w16을 사용 → exp7' w16이 baseline 겸용 (config 필드 단위 동일성 확인). 단 기존 0506 baseline 결과는 warmup0/전체트레이스 실행이라 50M/250M 결과와 혼용 금지. fig2(4KB vs 2MB)만 별도 baseline dir 필요
+  - MAX_PARALLEL=38 (48코어 중 10 여유, 사용자 결정). Exp1 70 runs ≈ 2웨이브 ≈ 24-30h
 - [ ] **A-3. stat 파이프라인 멀티코어 대응**
   - 멀티코어 출력 파싱 (코어별 IPC 섹션)
   - Weighted speedup, per-core IPC 저하율, per-core 에러 흡수, error way 점유/간섭
