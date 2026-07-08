@@ -30,7 +30,7 @@
   - 주입 지점 `DRAM_CHANNEL::service_packet`(src/dram_controller.cc:391)에서 `pkt->value().cpu`로 집계
   - 최종 stat 출력에 per-CPU 섹션 추가
   - 필요 이유: pending error를 "다음 read"가 소비하는 구조라 memory-heavy 코어가 에러 대부분을 흡수 → 코어별 통계 없이는 mix 해석 불가
-- [ ] **P0-2. TLB shootdown 멀티코어 페널티 모델** — **보류 (2026-07-07)**: remote 코어당 shootdown 비용 실측치가 없어 구현 연기. 트랙 A는 미모델(보수적 하한) 상태로 진행하고, 실측(옵션 B) 여부 논의 중
+- [ ] ~~P0-2. TLB shootdown 멀티코어 페널티 모델~~ — **미구현 확정 (2026-07-08, 옵션 A)**: remote 코어 shootdown은 "특정 프로세스의 매핑이 어느 코어 TLB에 상주하는지"를 제어/관측할 수 없어 엄밀한 실측이 불가하다고 판단. 트랙 A는 미모델 상태로 진행하며, 논문에는 "remote shootdown 비용 보수적 미포함 → 우리 이득의 하한(lower bound); 모델링 시 conventional의 offline 비용만 증가하므로 이득 확대 방향"으로 명시 (아웃라인 §8.B 서술과 일관)
   - 현재: page offline 비용(454,568 cycles)이 해당 DRAM 패킷 1개에만 부과 → 타 코어 무영향
   - 목표: offline(retirement) 발생 시 **모든 코어에 shootdown stall 부과** (아웃라인 §8.B의 future work가 바로 이것 — "shootdown 비용은 코어 수에 비례 증폭")
   - 구현 방향: retirement 이벤트 시 O3_CPU별 stall 주입 (fixed penalty per core). ChampSim에 IPI 모델이 없으므로 고정 페널티로 근사, 페널티 값은 4KB/2MB 각각 실측치 기반 스케일
@@ -45,10 +45,13 @@
 
 ## 트랙 A — 멀티코어 mix 실험 (Phase 0 직후)
 
-- [ ] **A-1. mix 구성**: `stat_script_rev/baseline_workloads_rbmpki_ipc.csv`의 RBMPKI 랭킹 활용
-  - memory-intensive mix 4개, CPU-intensive mix 4개 (+hybrid 2개 선택)
-  - SPEC + GAP 혼합 허용
-- [ ] **A-2. 실행 매트릭스**: 8~10 mix × {no-error, conventional offline, LLC pinning} × CE rate 2개(1e-6, 1e-7 상당 interval) ≈ **48~60 runs**
+- [x] **A-1. mix 구성** (2026-07-08 완료): **SPEC only** (사용자 지시로 GAP 제외). 2MB RBMPKI 랭킹 기준 pool이 정확히 5:5로 갈림
+  - memory pool: mcf(21.4) fotonik3d(21.0) gcc(17.8) bwaves(16.3) omnetpp(13.3) → M1~M4 (leave-one-out)
+  - cpu pool: cactuBSSN(8.1) wrf(6.1) roms(5.0) pop2(4.5) xalancbmk(2.8) → C1~C4 (leave-one-out)
+  - hybrid: H1(mcf fotonik3d xalancbmk pop2), H2(gcc omnetpp wrf roms)
+- [ ] **A-2. 실행 매트릭스**: 10 mix × 5 binary(noerr, off/pin × 1e-6/1e-7) = **50 runs**
+  - `sim_configs/multicore/run_mixes.sh` (skip-if-done, MAX_PARALLEL, WARMUP/SIM/RESULT_DIR env-override) — tiny run으로 5/5 DONE 검증 완료
+  - 기본 warmup 50M + sim 250M per core (아웃라인 설정). 예상 소요: run당 ~10-15h → MAX_PARALLEL=4 기준 약 5-6일, 8 기준 약 3일
 - [ ] **A-3. stat 파이프라인 멀티코어 대응**
   - 멀티코어 출력 파싱 (코어별 IPC 섹션)
   - Weighted speedup, per-core IPC 저하율, per-core 에러 흡수, error way 점유/간섭
