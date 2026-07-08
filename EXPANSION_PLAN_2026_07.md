@@ -63,6 +63,19 @@
 
 ## 트랙 B — 비교 기법 구현 (트랙 A 시뮬과 병행)
 
+### B-0. CARE 구현 설계 (2026-07-08 고정, 원문 papers/19_CARE_*.pdf §III-IV 기준)
+- **위치**: `ErrorPageManager`에 CARE 모드 추가 (`scheme: "care"` config 키) + `DRAM_CHANNEL::service_packet`의 기존 CYCLE 주입 분기에 3번째 경로. LLC pinning 코드는 건드리지 않음
+- **ECC cache**: 2-way × 1024 set (10-bit index = channel/rank/bank/partial-row 비트 — ChampSim `address_mapping`의 슬라이서에서 추출). Entry: 유효비트 + 태그 + 8×2-bit local counter (BCH 코드 자체는 저장 불필요, 존재 여부만 모델링)
+- **동작**: (1) 에러 주입 시 해당 64B 블록을 ECC cache에 등록(S1), replacement는 원문 Pseudocode 1 (S3 있으면 무대체 / min-error-count 우선 / S0-S1 우선 대체) (2) 추적 중 블록의 read → **+30 cycle BCH decode latency** (3) state machine: S1 --write--> S2 --read+err--> S3 --read--> retire (우리 주입은 전부 hard error → soft elasticity 미발현, CARE에 불리하지 않은 보수적 단순화로 논문 명시)
+- **Retirement**: 기존 `retire_page()` 재사용하되 CARE는 4KB 단위 설계 → 2MB 환경 이식이 비교 포인트. Proactive retirement(set당 8×4-bit global counter, max≥15 && max-min≥12)는 2차 구현(옵션)
+- **BCH 30 cycles**: 원문 2.5GHz 기준. 4GHz 스케일 시 48 cycles — **열린 결정 #1**, 기본은 30 cycle 유지(보수적)
+- **검증**: (a) noerr 대비 bit-identical (scheme off일 때) (b) 에러 없는 조건에서 CARE == noerr (c) tiny run에서 state 전이 로그 수동 확인
+
+### B-0b. FreeFault 구현 설계
+- faulty line을 **natural set에 상주 pin**: `handle_fill`의 error-way 분기와 별개로, `is_error_data` && scheme==freefault면 victim 선정에서 해당 라인 제외(lock) + 항상 LLC hit 유지
+- set당 lock 상한(기본 1 way 상당) 초과 시 초과분은 unprotected (원문 lock-control 방식)
+- retire 없음 — CE rate 상승 시 LLC 용량 잠식이 스토리
+
 - [ ] **B-1. CARE 구현** (원문 §III 기준, `papers/19_CARE_*.pdf`)
   - ECC cache: 2-way × 1024 sets(10-bit index: channel/rank/bank/partial-row — ChampSim address_mapping에서 추출)
   - CE 발생(CYCLE 주입) 시 등록(S1). 추적 중 블록의 read에 **+30 cycle BCH 디코딩 latency** (2.5GHz 기준 수치 — 주파수 스케일 여부 결정 필요)
