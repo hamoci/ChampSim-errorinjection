@@ -397,6 +397,7 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
         if (epm.is_cache_pinning_enabled()) {
           // LLC Pinning ON: Dual-Layer Recording (PERT) + dynamic/fixed latency per case
           ErrorRecordResult result = epm.record_error(raw_pa);
+          epm.record_error_result_cpu(pkt->value().cpu, result);
 
           switch (result) {
             case ErrorRecordResult::FIRST_ERROR:
@@ -443,6 +444,7 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
         } else {
           // LLC Pinning OFF: count errors per page, apply latency only on retirement
           bool retired = epm.record_baseline_error(raw_pa);
+          epm.record_baseline_error_cpu(pkt->value().cpu, retired);
           if (retired) {
             if (pkt->value().type == access_type::TRANSLATION) {
               error_latency = epm.get_pte_error_latency();

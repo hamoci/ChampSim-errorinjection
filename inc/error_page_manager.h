@@ -15,6 +15,7 @@
 
 #include <unordered_set>
 #include <unordered_map>
+#include <map>
 #include <array>
 #include <vector>
 #include <random>
@@ -45,6 +46,17 @@ struct ECTEntry {
     uint64_t tag{0};       // page base PA
     uint8_t counter{0};    // CE count
     bool valid{false};
+};
+
+// Per-CPU error attribution (multicore mix interpretation).
+// An error is attributed to the CPU whose DRAM read packet consumed it.
+struct PerCpuErrorStats {
+    uint64_t errors_absorbed{0};      // total CYCLE errors consumed by this CPU's packets
+    uint64_t first_errors{0};         // FIRST_ERROR results (pinning ON)
+    uint64_t added_errors{0};         // ADDED_ERROR results (pinning ON)
+    uint64_t already_known{0};        // ALREADY_KNOWN results (pinning ON)
+    uint64_t retirements{0};          // PAGE_RETIRED results (pinning ON)
+    uint64_t baseline_retirements{0}; // retirements triggered via baseline path (pinning OFF)
 };
 
 class ErrorPageManager {
@@ -86,6 +98,9 @@ private:
 
     // Retirement detail
     uint64_t stat_retirement_invalidated_lines{0};  // total cache lines invalidated by retirement sweeps
+
+    // Per-CPU error attribution (ordered map for stable print order)
+    std::map<uint32_t, PerCpuErrorStats> per_cpu_error_stats;
 
 //For Random Error Injection
 private:
@@ -193,6 +208,25 @@ public:
     uint64_t get_stat_already_known_count() const { return stat_already_known_count; }
     void add_retirement_invalidated_lines(uint64_t count) { stat_retirement_invalidated_lines += count; }
     void print_error_stats() const;
+
+    // Per-CPU error attribution (stats only, no behavioral effect)
+    void record_error_result_cpu(uint32_t cpu_idx, ErrorRecordResult result) {
+        auto& s = per_cpu_error_stats[cpu_idx];
+        s.errors_absorbed++;
+        switch (result) {
+            case ErrorRecordResult::FIRST_ERROR:   s.first_errors++; break;
+            case ErrorRecordResult::ADDED_ERROR:   s.added_errors++; break;
+            case ErrorRecordResult::ALREADY_KNOWN: s.already_known++; break;
+            case ErrorRecordResult::PAGE_RETIRED:  s.retirements++; break;
+        }
+    }
+    void record_baseline_error_cpu(uint32_t cpu_idx, bool retired) {
+        auto& s = per_cpu_error_stats[cpu_idx];
+        s.errors_absorbed++;
+        if (retired) s.baseline_retirements++;
+    }
+    const std::map<uint32_t, PerCpuErrorStats>& get_per_cpu_error_stats() const { return per_cpu_error_stats; }
+    void print_per_cpu_error_stats() const;
 
     // ============================================================
     // Existing API (unchanged)

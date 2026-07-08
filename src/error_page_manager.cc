@@ -176,7 +176,22 @@ void ErrorPageManager::print_error_stats() const {
                    static_cast<double>(stat_retirement_invalidated_lines) / static_cast<double>(stat_retirement_count));
     }
 
+    print_per_cpu_error_stats();
+
     fmt::print("[ERROR] ============================================================\n");
+}
+
+void ErrorPageManager::print_per_cpu_error_stats() const {
+    if (per_cpu_error_stats.empty()) {
+        return;
+    }
+    fmt::print("[ERROR]\n");
+    fmt::print("[ERROR] [Per-CPU Error Attribution]\n");
+    for (const auto& [cpu_idx, s] : per_cpu_error_stats) {
+        fmt::print("[ERROR]   CPU {}: absorbed={} first={} added={} known={} retired={} baseline_retired={}\n",
+                   cpu_idx, s.errors_absorbed, s.first_errors, s.added_errors,
+                   s.already_known, s.retirements, s.baseline_retirements);
+    }
 }
 
 // ============================================================

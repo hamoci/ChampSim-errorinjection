@@ -1343,6 +1343,7 @@ void CACHE::print_error_way_stats() const
     fmt::print("[LLC]   Retired (page offline):         {} ({:.2f}%)\n", retired_n, coverage);
     fmt::print("[LLC]   Live (still tracked):           {}\n", live_n);
     fmt::print("[LLC] ==================================================\n");
+    epm.print_per_cpu_error_stats();
     return;
   }
 
