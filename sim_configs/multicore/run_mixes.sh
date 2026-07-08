@@ -17,7 +17,7 @@ set -euo pipefail
 
 CHAMPSIM_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 TRACE_DIR="${TRACE_DIR:-${CHAMPSIM_DIR}/test_traces}"
-RESULT_DIR="${RESULT_DIR:-${CHAMPSIM_DIR}/sim_configs/multicore/results}"
+RESULT_DIR="${RESULT_DIR:-${CHAMPSIM_DIR}/results/multicore/1_headline}"
 LOG_FILE="${RESULT_DIR}/run_mixes.log"
 
 WARMUP="${WARMUP:-50000000}"
