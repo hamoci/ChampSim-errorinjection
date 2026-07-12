@@ -437,7 +437,10 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
           if (care_first_service && !care_retired_now && epm.consume_cycle_error()) {
             // SEC-DED corrects the block inline and registration/encoding is
             // background work — the consuming read itself pays nothing (plan D2).
-            epm.care_on_injected_error(raw_pa, pkt->value().cpu);
+            // op_idx (rank/bankgroup/bank) folded mod 8 feeds the proactive
+            // per-set global counters (bank-fold adaptation, care_ecc_cache.h).
+            epm.care_on_injected_error(raw_pa, pkt->value().cpu,
+                                       static_cast<uint8_t>(op_idx % CareEccCache::NUM_GLOBAL_COUNTERS));
             epm.record_error_access();
           }
         } else if (ErrorPageManager::get_instance().consume_cycle_error()) {
@@ -579,6 +582,10 @@ void MEMORY_CONTROLLER::initialize()
                epm.get_care_ecc_sets(), epm.get_care_ecc_ways(), epm.get_care_bch_decode_cycles());
     if (epm.is_care_demand_scrub()) {
       fmt::print("[ERROR_PAGE_MANAGER] CARE demand scrubbing: ON (registration auto-confirms S1->S2)\n");
+    }
+    if (epm.is_care_proactive()) {
+      fmt::print("[ERROR_PAGE_MANAGER] CARE proactive retirement: ON (8x4-bit global counters/set, saturate {} + bias >= {})\n",
+                 CareEccCache::GLOBAL_COUNTER_MAX, CareEccCache::PROACTIVE_BIAS_MIN);
     }
   }
 

@@ -71,6 +71,14 @@
 - **BCH 30 cycles**: 원문 2.5GHz 기준. 4GHz 스케일 시 48 cycles — **열린 결정 #1**, 기본은 30 cycle 유지(보수적)
 - **검증**: (a) noerr 대비 bit-identical (scheme off일 때) (b) 에러 없는 조건에서 CARE == noerr (c) tiny run에서 state 전이 로그 수동 확인
 
+### B-1c. Proactive retirement — 구현 완료, bank-fault 주입만 제외 (2026-07-13 결정 수정)
+- 2026-07-10에는 "제외"였으나 2026-07-13 사용자 결정으로 **구조는 구현하되 에러 주입 모델은 불변**으로 수정: "구현했고 균일 주입에서 설계 의도대로 침묵함"이 "미구현"보다 강한 방어 위치
+- 구현 (커밋 참조): set당 8×4-bit global counter, reactive retire 시 entry의 bank(op_idx fold mod 8) counter에 기여 누적(상한 3 = 원문 2-bit local counter 최대), 포화(15) && 편중(max−min≥12) 시 set 상주 페이지 일괄 retire, 포화-무편중 시 라운드 리셋. `care_proactive` config (기본 off). Peak Counter/Peak Bias 통계로 문턱 대비 여유를 실측 출력
+- 검증 (mcf 30M @1e-8): ① proactive off pre/post bit-identical ② on에서 트리거 0 + off와 동작 동일(통계 블록 외 diff 0) ③ **Peak Counter 3/15, Peak Bias 3/12** — 문턱의 1/5, 1/4 수준으로 침묵 (chi-square 균일성 증거와 정합) ④ 단위테스트 14케이스/120 assertions (proactive 5케이스: 동일-bank 5회 retire로 포화+트리거, 기여 상한, 비활성 무영향, victim 목록)
+- bank-fault 주입 확장은 계속 제외 (에러 주입 regime 일관성 훼손 사유, 2026-07-10 논리 유지)
+- 논문 서술: full CARE 구조 구현 + "균일 cell-fault 체제에서 proactive는 설계상·실측상 침묵(Peak Bias 3/12)" → reactive(+scrub) 결과가 곧 full CARE 결과
+- demand-scrub 정당화 최종 프레임 (2026-07-13): ①메커니즘 불변(정정 write도 Fig5 write path의 정당한 write) ②원문 fleet의 patrol scrubbing이 모든 faulty line에 유계 시간 내 확정 write 보장 → S1 영구주차는 유한 시뮬 창 아티팩트 ③hard fault 결정성으로 scrub 타이밍은 retire "시점"만 좌우 → scrub-ON=창내 비용 상한/OFF=하한 (bracketing) ④양쪽 보고: CARE-DS(주)/CARE-AW(민감도) ⑤결론은 어느 모델에서도 성립
+
 ### B-1b. CARE demand-scrub 모델 (2026-07-10 구현, 커밋 77f92ef)
 - 문제: 현행 S1→S2가 애플리케이션 writeback에만 게이트되어 hard line의 86%가 S1에 영구 주차 (mcf 1e-8: 등록 2,259 중 write 확정 325) → retire 희소 → CARE IPC가 noerr 수준으로 과대평가 + coverage 과소평가
 - 해법: `care_demand_scrub` config (기본 off). ON 시 등록 직후 `on_write` 1회 = MC demand scrub의 corrective write 모델링 (원문 fleet은 scrubbing 사용, p.533 각주1; Fig 5 write path가 scrub write에도 그대로 적용됨). 에러 주입 모델 자체는 무변경

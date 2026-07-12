@@ -1,5 +1,7 @@
 #include <catch.hpp>
 
+#include <algorithm>
+
 #include "care_ecc_cache.h"
 
 namespace
@@ -187,4 +189,84 @@ TEST_CASE("Set indexing separates lines by address bits 6.. and honors geometry"
   REQUIRE(ecc.num_sets() == 2);
   REQUIRE(ecc.num_ways() == 1);
   REQUIRE(ecc.occupancy() == 2);
+}
+
+namespace
+{
+// Drive one full hard-fault confirmation sequence to retirement:
+// error(register, S1) -> write(S2) -> read(S3) -> read(retire).
+// err_count at retirement = 3, so each retirement contributes exactly
+// LOCAL_CONTRIB_CAP (3) to its bank's global counter.
+CareEccCache::ReadOutcome retire_sequence(CareEccCache& ecc, uint64_t line, uint8_t bank)
+{
+  REQUIRE(ecc.on_error(line, bank) == CareEccCache::RegisterOutcome::REGISTERED);
+  REQUIRE(ecc.on_write(line));
+  REQUIRE(ecc.on_read(line).promoted_s3);
+  return ecc.on_read(line);
+}
+} // namespace
+
+TEST_CASE("Proactive: five same-bank retirements saturate and trigger; counters reset")
+{
+  CareEccCache ecc{1, 8, /*proactive_enabled=*/true};
+
+  for (int i = 0; i < 4; ++i) {
+    auto out = retire_sequence(ecc, line_in_set(0, i), /*bank=*/0);
+    REQUIRE(out.retire);
+    REQUIRE_FALSE(out.proactive); // counter at 3*(i+1) <= 12 < 15
+    ecc.invalidate_page(line_in_set(0, i) & CareEccCache::PAGE_BASE_MASK);
+  }
+  REQUIRE(ecc.global_counter(0, 0) == 12);
+
+  auto out = retire_sequence(ecc, line_in_set(0, 4), /*bank=*/0);
+  REQUIRE(out.retire);
+  REQUIRE(out.proactive); // counter saturates at 15; bias 15-0 >= 12
+  REQUIRE(ecc.stats().proactive_triggers == 1);
+  REQUIRE(ecc.global_counter(0, 0) == 0); // round closed: counters reset
+  REQUIRE(ecc.stats().gc_resets == 1);
+  REQUIRE(ecc.stats().gc_peak_value == 15);
+  REQUIRE(ecc.stats().gc_peak_bias == 15);
+}
+
+TEST_CASE("Proactive: per-retirement contribution is capped at the 2-bit local maximum")
+{
+  CareEccCache ecc{1, 8, /*proactive_enabled=*/true};
+  const uint64_t line = line_in_set(0);
+
+  REQUIRE(ecc.on_error(line, /*bank=*/2) == CareEccCache::RegisterOutcome::REGISTERED);
+  for (int i = 0; i < 10; ++i)
+    ecc.on_read(line); // S1 reads inflate err_count well past the cap
+  REQUIRE(ecc.on_write(line));
+  REQUIRE(ecc.on_read(line).promoted_s3);
+  auto out = ecc.on_read(line);
+  REQUIRE(out.retire);
+  REQUIRE_FALSE(out.proactive);
+  REQUIRE(ecc.global_counter(0, 2) == CareEccCache::LOCAL_CONTRIB_CAP); // 3, not 13
+}
+
+TEST_CASE("Proactive disabled: retirements leave global counters untouched")
+{
+  CareEccCache ecc{1, 8}; // default: proactive off
+
+  auto out = retire_sequence(ecc, line_in_set(0), /*bank=*/0);
+  REQUIRE(out.retire);
+  REQUIRE_FALSE(out.proactive);
+  REQUIRE(ecc.global_counter(0, 0) == 0);
+  REQUIRE(ecc.stats().gc_accumulations == 0);
+}
+
+TEST_CASE("Proactive victim list: distinct resident pages of the triggering set")
+{
+  CareEccCache ecc{1, 8, /*proactive_enabled=*/true};
+  const uint64_t page_a = 0;          // lines below both fall in this 2MB page
+  const uint64_t page_b = PAGE_2MB;
+
+  REQUIRE(ecc.on_error(line_in_set(0, 0), 0) == CareEccCache::RegisterOutcome::REGISTERED);
+  REQUIRE(ecc.on_error(line_in_set(0, 1), 1) == CareEccCache::RegisterOutcome::REGISTERED);
+  REQUIRE(ecc.on_error(PAGE_2MB + line_in_set(0, 0), 2) == CareEccCache::RegisterOutcome::REGISTERED);
+
+  auto pages = ecc.set_resident_pages(line_in_set(0, 0));
+  REQUIRE(pages.size() == 2);
+  REQUIRE(std::find(pages.begin(), pages.end(), page_a) != pages.end());
+  REQUIRE(std::find(pages.begin(), pages.end(), page_b) != pages.end());
 }

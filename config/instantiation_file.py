@@ -463,6 +463,8 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         # Emitted only when true: scrub-off care configs keep byte-identical generated code
         if error_page_manager.get('care_demand_scrub', False):
             yield '  epm.set_care_demand_scrub(true);'
+        if error_page_manager.get('care_proactive', False):
+            yield '  epm.set_care_proactive(true);'
 
     if 'debug' in error_page_manager:
         yield f'  epm.set_debug({error_page_manager["debug"]});'

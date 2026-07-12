@@ -106,6 +106,7 @@ def error_page_manager_defaults():
         'baseline_retirement_threshold': 1,
         'care': False,
         'care_demand_scrub': False,
+        'care_proactive': False,
         'care_bch_decode_cycles': 30,
         'care_ecc_sets': 1024,
         'care_ecc_ways': 2,

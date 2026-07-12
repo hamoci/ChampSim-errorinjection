@@ -3,7 +3,8 @@
 #include <algorithm>
 #include <cassert>
 
-CareEccCache::CareEccCache(std::size_t num_sets, std::size_t num_ways) : sets_(num_sets), ways_(num_ways), entries_(num_sets * num_ways)
+CareEccCache::CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled)
+    : sets_(num_sets), ways_(num_ways), proactive_enabled_(proactive_enabled), entries_(num_sets * num_ways), gcounters_(num_sets)
 {
   assert(sets_ > 0 && (sets_ & (sets_ - 1)) == 0); // power of two (set_index masking)
   assert(ways_ > 0);
@@ -45,9 +46,54 @@ CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr)
   case State::S3:
     out.retire = true; // caller retires the page, then invalidate_page() drops this entry
     stats_.retires++;
+    if (proactive_enabled_)
+      out.proactive = account_retirement(set_index(line_addr), *e);
     break;
   }
   return out;
+}
+
+// Paper Section III.C: at each (reactive) retirement the block's local error
+// counters accumulate into the set's global counters; when some counter
+// saturates, a max-min bias >= 12 means the confirmed hard errors concentrate
+// on one bank/chip -> proactive retirement of everything the set protects.
+// Saturation without bias closes the accounting round (counters reset).
+bool CareEccCache::account_retirement(std::size_t set, const Entry& e)
+{
+  auto& gc = gcounters_[set];
+  uint32_t contrib = std::min(e.err_count, LOCAL_CONTRIB_CAP);
+  gc[e.bank_idx] = static_cast<uint8_t>(std::min<uint32_t>(GLOBAL_COUNTER_MAX, gc[e.bank_idx] + contrib));
+  stats_.gc_accumulations++;
+
+  auto [min_it, max_it] = std::minmax_element(gc.begin(), gc.end());
+  uint8_t bias = static_cast<uint8_t>(*max_it - *min_it);
+  stats_.gc_peak_value = std::max(stats_.gc_peak_value, *max_it);
+  stats_.gc_peak_bias = std::max(stats_.gc_peak_bias, bias);
+
+  if (*max_it < GLOBAL_COUNTER_MAX)
+    return false; // round still accumulating
+
+  bool triggered = bias >= PROACTIVE_BIAS_MIN;
+  if (triggered)
+    stats_.proactive_triggers++;
+  gc.fill(0);
+  stats_.gc_resets++;
+  return triggered;
+}
+
+std::vector<uint64_t> CareEccCache::set_resident_pages(uint64_t line_addr) const
+{
+  std::vector<uint64_t> pages;
+  auto set = set_index(line_addr);
+  for (std::size_t w = 0; w < ways_; ++w) {
+    const auto& e = entries_[set * ways_ + w];
+    if (!e.valid)
+      continue;
+    uint64_t page = e.line_addr & PAGE_BASE_MASK;
+    if (std::find(pages.begin(), pages.end(), page) == pages.end())
+      pages.push_back(page);
+  }
+  return pages;
 }
 
 bool CareEccCache::on_write(uint64_t line_addr)
@@ -110,7 +156,7 @@ CareEccCache::Entry* CareEccCache::pick_victim(std::size_t set)
   return only_min; // lowest-index deterministic tie-break
 }
 
-CareEccCache::RegisterOutcome CareEccCache::on_error(uint64_t line_addr)
+CareEccCache::RegisterOutcome CareEccCache::on_error(uint64_t line_addr, uint8_t bank_idx)
 {
   if (Entry* e = find(line_addr); e != nullptr) {
     stats_.errors_on_tracked++; // already faulty: no state/count change (D3)
@@ -134,7 +180,7 @@ CareEccCache::RegisterOutcome CareEccCache::on_error(uint64_t line_addr)
     return RegisterOutcome::DROPPED;
   }
 
-  *slot = Entry{line_addr, 1, State::S1, true};
+  *slot = Entry{line_addr, 1, State::S1, true, static_cast<uint8_t>(bank_idx % NUM_GLOBAL_COUNTERS)};
   stats_.registered++;
   return RegisterOutcome::REGISTERED;
 }

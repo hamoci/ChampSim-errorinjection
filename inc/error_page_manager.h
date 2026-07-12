@@ -147,12 +147,17 @@ private:
     // immediately drives the S1->S2 hard-error-confirmation step. OFF reproduces
     // the app-writeback-gated behavior of the paper's gem5 evaluation.
     bool care_demand_scrub{false};
+    // Proactive retirement (paper III.C): full-CARE structure. Under uniform
+    // cell-fault injection the trigger provably never fires (see care_ecc_cache.h);
+    // peak-margin stats are printed as the measured evidence.
+    bool care_proactive{false};
     uint32_t care_bch_decode_cycles{30};  // for stat printing; latency below is authoritative
     champsim::chrono::clock::duration care_bch_decode_latency{};
     size_t care_ecc_sets{1024};
     size_t care_ecc_ways{2};
     std::unique_ptr<CareEccCache> care_cache;
     uint64_t stat_care_retirement_count{0};
+    uint64_t stat_care_proactive_page_count{0};  // pages retired by proactive batches
 
 // Error Statistics
 private:
@@ -326,6 +331,8 @@ public:
     void set_care_ecc_geometry(size_t sets, size_t ways) { care_ecc_sets = sets; care_ecc_ways = ways; }
     void set_care_demand_scrub(bool enabled) { care_demand_scrub = enabled; }
     bool is_care_demand_scrub() const { return care_demand_scrub; }
+    void set_care_proactive(bool enabled) { care_proactive = enabled; }
+    bool is_care_proactive() const { return care_proactive; }
     size_t get_care_ecc_sets() const { return care_ecc_sets; }
     size_t get_care_ecc_ways() const { return care_ecc_ways; }
 
@@ -337,7 +344,7 @@ public:
     // Every DRAM write (first service): S1→S2 confirmation.
     void care_on_write(uint64_t pa);
     // Injected error consumed by a read packet: registration attempt (no latency).
-    void care_on_injected_error(uint64_t pa, uint32_t cpu_idx);
+    void care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint8_t bank_idx = 0);
 
     uint64_t get_stat_care_retirement_count() const { return stat_care_retirement_count; }
     void print_care_stats() const;

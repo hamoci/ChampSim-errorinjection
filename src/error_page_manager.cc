@@ -149,7 +149,7 @@ void ErrorPageManager::init_care_cache() {
                    care_ecc_sets, care_ecc_ways);
         std::abort();
     }
-    care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways);
+    care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways, care_proactive);
 }
 
 CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t cpu_idx) {
@@ -162,6 +162,14 @@ CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t c
 
     if (out.retire) {
         uint64_t page_base = get_page_base_pa(pa);
+
+        // Proactive victim list must be collected before any invalidation:
+        // the triggering entry (and its set neighbors) are still resident here.
+        std::vector<uint64_t> proactive_victims;
+        if (out.proactive) {
+            proactive_victims = care_cache->set_resident_pages(cl_addr);
+        }
+
         size_t invalidated = care_cache->invalidate_page(page_base);
         retire_page(page_base, /*queue_llc_sweep=*/false);  // coverage move + counter erase; no sweep consumer under CARE
         stat_care_retirement_count++;
@@ -169,6 +177,26 @@ CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t c
         if (debug == 1) {
             fmt::print("[CARE] RETIRE page=0x{:x} trigger_addr=0x{:x} ecc_entries_invalidated={}\n",
                        page_base, cl_addr, invalidated);
+        }
+
+        if (out.proactive) {
+            // Paper III.C: retire everything the set protects. The triggering
+            // packet's single page-offline latency stands in for the batched
+            // interrupt (cost under-counted; trigger count is the metric here).
+            for (uint64_t victim : proactive_victims) {
+                if (victim == page_base) continue;
+                size_t v_inv = care_cache->invalidate_page(victim);
+                retire_page(victim, /*queue_llc_sweep=*/false);
+                stat_care_proactive_page_count++;
+                if (debug == 1) {
+                    fmt::print("[CARE] PROACTIVE RETIRE page=0x{:x} (set of 0x{:x}) ecc_entries_invalidated={}\n",
+                               victim, cl_addr, v_inv);
+                }
+            }
+            if (debug == 1) {
+                fmt::print("[CARE] PROACTIVE TRIGGER trigger_addr=0x{:x} batch_pages={}\n",
+                           cl_addr, proactive_victims.size());
+            }
         }
     }
     return out;
@@ -182,7 +210,7 @@ void ErrorPageManager::care_on_write(uint64_t pa) {
     }
 }
 
-void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx) {
+void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint8_t bank_idx) {
     uint64_t cl_addr = get_cache_line_addr(pa);
 
     // Ground-truth faulty-line set for the Protection Coverage metric (D8).
@@ -195,7 +223,7 @@ void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx) {
     auto& s = per_cpu_error_stats[cpu_idx];
     s.errors_absorbed++;
 
-    switch (care_cache->on_error(cl_addr)) {
+    switch (care_cache->on_error(cl_addr, bank_idx)) {
     case CareEccCache::RegisterOutcome::REGISTERED:
         s.care_registered++;
         if (debug == 1) fmt::print("[CARE] REG addr=0x{:x} (S1)\n", cl_addr);
@@ -245,6 +273,16 @@ void ErrorPageManager::print_care_stats() const {
     fmt::print("[CARE]\n");
     fmt::print("[CARE] [Retirement]\n");
     fmt::print("[CARE]   Pages Retired (reactive):       {}\n", stat_care_retirement_count);
+    if (care_proactive) {
+        fmt::print("[CARE]\n");
+        fmt::print("[CARE] [Proactive Retirement]\n");
+        fmt::print("[CARE]   Triggers:                       {}\n", s.proactive_triggers);
+        fmt::print("[CARE]   Pages Retired (proactive):      {}\n", stat_care_proactive_page_count);
+        fmt::print("[CARE]   Counter Accumulations:          {}\n", s.gc_accumulations);
+        fmt::print("[CARE]   Accounting Rounds Closed:       {}\n", s.gc_resets);
+        fmt::print("[CARE]   Peak Counter Value:             {} / {} (saturation)\n", s.gc_peak_value, CareEccCache::GLOBAL_COUNTER_MAX);
+        fmt::print("[CARE]   Peak Bias (max-min):            {} / {} (trigger bound)\n", s.gc_peak_bias, CareEccCache::PROACTIVE_BIAS_MIN);
+    }
     fmt::print("[CARE]   ECC Entries Invalidated:        {}\n", s.invalidated_entries);
     fmt::print("[CARE]\n");
     fmt::print("[CARE] [Final ECC Cache State]\n");
