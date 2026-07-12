@@ -28,7 +28,8 @@ build_configs() {
   for config in ${configs}; do
     echo "  config.sh ${config}"
     ./config.sh "${config}"
-    make -j"$(nproc)" 2>&1 | tail -1
+    # Shared server: always leave ~8 cores free
+    make -j"${BUILD_JOBS:-$(($(nproc) - 8))}" 2>&1 | tail -1
   done
 }
 
@@ -61,6 +62,9 @@ if [[ "${FILTER}" == "all" || "${FILTER}" == "6" ]]; then
 fi
 if [[ "${FILTER}" == "all" || "${FILTER}" == "7" ]]; then
   build_configs "7_no_error_way_sweep"
+fi
+if [[ "${FILTER}" == "all" || "${FILTER}" == "8" ]]; then
+  build_configs "8_care_comparison"
 fi
 
 echo ""

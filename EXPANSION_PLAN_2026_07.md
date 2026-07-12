@@ -76,21 +76,36 @@
 - set당 lock 상한(기본 1 way 상당) 초과 시 초과분은 unprotected (원문 lock-control 방식)
 - retire 없음 — CE rate 상승 시 LLC 용량 잠식이 스토리
 
-- [ ] **B-1. CARE 구현** (원문 §III 기준, `papers/19_CARE_*.pdf`)
+- [x] **B-1. CARE 구현** (2026-07-09 완료 — reactive-only 간략화 설계, 사용자 확정)
+  - 신규: `inc/care_ecc_cache.h` + `src/care_ecc_cache.cc` (순수 로직 클래스) + `test/cpp/src/048-care-ecc-cache.cc` (9 케이스 65 assertion 통과)
+  - 수정: `error_page_manager.{h,cc}` (care API/stats), `dram_controller.{h,cc}` (service_packet 훅 + request_type care 메모 — write-mode swap 재서비스 중복 방지), `cache.cc` (OFF 분기 stat 출력), `config/{defaults,instantiation_file}.py`
+  - config 키: `care`(bool), `care_bch_decode_cycles`(30), `care_ecc_sets`(1024), `care_ecc_ways`(2). `care`+`cache_pinning` 동시 설정 시 fail-fast abort
+  - 검증 완료: (a) pre/post 바이너리 stdout bit-identical (noerr/pin/off × mcf 10M, 벽시계 제외) (b) care ON+주입 OFF == noerr (c) mcf 10M 1.44M interval에서 전체 궤적 실증 (REG→S1S2→S2S3→retire 1건) (d) 스트레스 런(10k interval) 2,492 주소 궤적 위반 0건, set 만석 DROP 839건 관측 (coverage 붕괴 스토리 데이터 확보 가능) (e) make pytest 228 통과
+  - 원문 대비 편차 대장은 구현 계획 문서와 `care_ecc_cache.h` 헤더 주석에 고정
+  - **명명·방어 프레임 확정 (2026-07-10, 외부 비판 반영)**: 우리 구현 = **원문이 스스로 정의한 PR_3 구성(reactive-only CARE)** — 논문에서 "CARE"가 아니라 "CARE (reactive-only, = PR_3 in [CARE])"로 명명할 것. 방어 논리는 축별로 분리:
+    - 신뢰도 축: **비교 주장 자체를 안 함** (FIT vs FIT 결정). PR_3가 full CARE 대비 신뢰도 1/5(원문 Fig 6)라는 공격은 우리가 신뢰도 수치를 제시하지 않으므로 과녁이 없음 — 단, 이를 본문에 선제 명시 (proactive의 신뢰도 기여 인정 + scope 제외 선언)
+    - 성능·용량 축(우리가 주장하는 축): PR_3 선택은 CARE에 유리한 보수적 설정 (proactive는 트리거당 최대 2048페이지=4GB 일괄 retire → full CARE의 성능/용량은 우리 수치보다 나쁘거나 같음 = 하한 논증)
+    - proactive 미구현의 실측 근거 (가정→측정으로 교체): 주입 에러 주소 1,886개(디버그 런 2종)의 물리 bank 분포(슬라이서 실측: ch=bit6, bg=bits7-9, bank=bits10-11, 총 64 bank)가 **chi-square 25.3 (df=63, 95% 임계 82.5) → 균일 분포와 통계적으로 구별 불가**. counter는 retire당 +1인데 run당 retire ≤62가 64 bank·다수 set-영역으로 분산 → bank당 기대 counter ≈1로 max≥15(포화)와 max−min≥12(편중) 둘 다 자릿수 단위로 미달. 트리거 이중 불발 확정
+  - **멀티에이전트 코드리뷰 후 수정 (2026-07-09)**: (1) 주입 소비를 CARE에서 first-service로 제한 — swap_write_mode 재서비스가 pending error를 이중 소비하던 결함 수정. retire하는 read도 소비를 다음 read로 이연 (WRITE skip과 동일 규칙). **pinning/baseline의 재서비스 이중 소비는 기존 artifact로 무변경(bit-identical 제약) → CARE만 클린한 비대칭은 편차 대장에 기재** (2) CARE retire는 `retire_page(_, queue_llc_sweep=false)` — pinning-gated 소비자 탓에 무한 증가하던 큐 방지 (3) `care_ecc_sets` 2^n 검증: config 단(ValueError) + 런타임(fail-fast abort) 이중화 (4) codegen을 care=true일 때만 방출 — 기존 config의 `.csconfig` byte-identical (5) 2MB page mask 단일화(`CareEccCache::PAGE_BASE_MASK`), on_error 단일 조회(enum 반환), per-CPU 출력 일원화 (6) retired 라인 재주입 시 coverage 이중 계산은 baseline과 공유하는 기존 artifact로 문서화(코드 주석) (7) pick_victim의 도달 불가 tie-break는 원문 충실성 사유로 의도적 유지
+- ~~B-1 상세 (구현 전 설계 메모)~~ (원문 §III 기준, `papers/19_CARE_*.pdf`)
   - ECC cache: 2-way × 1024 sets(10-bit index: channel/rank/bank/partial-row — ChampSim address_mapping에서 추출)
   - CE 발생(CYCLE 주입) 시 등록(S1). 추적 중 블록의 read에 **+30 cycle BCH 디코딩 latency** (2.5GHz 기준 수치 — 주파수 스케일 여부 결정 필요)
   - State machine 단순화: 우리 주입은 hard error만 존재 → S1 → (write) S2 → (read+err) S3 → (read) retire. soft-error elasticity 미발현은 CARE에 불리하지 않은 보수적 단순화로 논문에 명시
   - Reactive retirement: 기존 retirement 경로(page offline 비용) 재사용, 단 CARE는 4KB 설계 → 우리 2MB 환경 이식 시 증폭 효과가 비교 포인트
   - Proactive retirement: set당 8×4-bit per-bank global counter, max≈15 && (max−min)≥12 시 set 보호 영역 전체 retire
   - replacement: 원문 Pseudocode 1 (min error count 우선, S3 비대체)
-- [ ] **B-2. FreeFault 구현** (원문 기준, `papers/freefault.pdf`)
+- [ ] ~~**B-2. FreeFault 구현**~~ — **생략 확정 (2026-07-09 사용자 결정)**: 비교 축을 성능(IPC 하락)으로 좁힘. 보호율/신뢰도 축은 FIT vs FIT (FaultSim류) 없이는 공정 비교 불가하므로 논문에서 주장하지 않음. FreeFault는 related work 서술로 강등 (B-0b 설계 메모는 기록용 유지)
   - faulty line을 **natural set에 line-lock** (reserved way 없음): 기존 `allocate_error_way`/`is_error_data` 변형
   - retire 없음 — lock 수 무제한 누적이 본질 (set당 lock 상한 도달 시 정책은 원문 lock-control 방식 참조)
   - "retired 위치는 항상 LLC hit" — 추가 latency/DRAM 트래픽 없음
   - CE rate 상승 시 LLC 용량 잠식 vs 우리 bounded quarantine way의 대비가 핵심 스토리
 - [ ] **B-3. Page-granularity pinning ablation** (공짜 baseline)
   - faulty line이 속한 페이지의 **모든 상주 라인**을 error way에 pin — line granularity 가치를 직접 입증
-- [ ] **B-4. 싱글코어 sweep 실행**: CE rate 1e5~1e8 errors/hour × 10 SPEC trace × {CARE, FreeFault, ablation} (기존 3개 scheme 결과 재사용) ≈ **~120 runs**
+- [ ] **B-4. 싱글코어 sweep 실행** (2026-07-10 착수): CARE × 4 rates × 10 SPEC = **40 runs**
+  - 실험 8번으로 편입: `sim_configs/normal_evaluation/8_care_comparison/` (generate_configs.py `gen_8_care_comparison`, `build_all.sh 8`, `run_8_care_comparison.sh`)
+  - exe `care_{1e-5..1e-8}`, EPM_CARE = CYCLE + care:true + 30cyc/1024set/2way 명시 + offline 454568 (pin/off와 동일 비용 모델)
+  - 기존 pin_on/pin_off(exp1) + noerr(exp7 w16) 결과 재사용 → 4-scheme 비교. ablation(B-3)은 별도 결정
+  - 결과: `results/normal_evaluation/8_care_comparison/`
 - [ ] **B-5. stat 스크립트에 scheme 축 추가** (5-scheme 비교 그래프)
 
 ## 트랙 C — 신규 워크로드 (조기 착수, 백그라운드)
@@ -111,7 +126,12 @@
   - Linux HugeTLB HGM 패치 시리즈(머지 거부, LWN 확인) — **OS-only 해법 실패의 강력한 모티베이션 근거**
   - CATalyst (HPCA'16, PDF 확인) — CAT pseudo-locking 실용성 선례
   - Victima (MICRO'23), Jung&Erez fault model (MICRO'23), ADDDC 벤더 문서(학술 성능 연구 부재 = 우리가 채우는 공백)
-- 스니펫만 확인된 것 (인용 전 원문 확인 필요): Pegasus (HPCA'25, Alibaba — ICCD'21 Du의 후속, 같은 계열 리뷰어 가능성), Cisco PPR 백서("DIMM fault 70% 수리"), MEMSYS'19 predictive offlining
+- **Pegasus (HPCA'25) 원문 검증 완료 (2026-07-09, `papers/Predicting_DRAM-Caused_Risky_VMs_*.pdf`)**: baseline 아님, related work 인용 확정
+  - 정체: AIOps/ML 운영 기법 — XGBoost(304 features)로 DRAM-caused risky VM(DCRV)을 예측해 node 대신 VM만 migration. 300k+ 노드 배포, node-level 대비 비용 70.3%↓. 아키텍처 변경/데이터패스 개입 전무 → IPC 비교 불가능, "왜 비교 안 했나" 리스크 없음
+  - CARE 선정 방어: 같은 Alibaba 계열의 최신 후속이 아키텍처가 아닌 fleet-level ML로 감 → metadata 계열 아키텍처 기법은 CARE(HPCA'21)가 여전히 최신·최근접
+  - 우리 논문에 유용한 인용: (a) 프로덕션 클라우드 VM 메모리 할당 단위가 2MB/1GB hugepage, DIMM 연속 row 배치 (§V-A, §VI) — 2MB offline 문제의 실증 근거 (b) page offlining 불충분 — UE 주소 중 CE 이력 보유 ≤12%, peak 시간대 대량 offlining의 성능 영향 명시 (§III-A) (c) 에러 공간 클러스터링: >98% single-bank, 에러 노드의 63%가 단일 VM 집중 (d) CE 발생량이 위험 VM 지표 — DCRV의 CE 수가 타 VM 대비 한 자릿수 이상 큼 (Table VI)
+  - 주의: (b)의 ≤12%는 CARE의 "UE 58%가 동일 블록 CE 선행" 관찰과 긴장 관계 (주소/페이지 granularity, 관측 윈도 상이) — 우리 모티베이션은 "CE→UE 예측 정확도"가 아니라 "성급한 2MB offline 회피 + bounded 보호"로 서술
+- 스니펫만 확인된 것 (인용 전 원문 확인 필요): Cisco PPR 백서("DIMM fault 70% 수리"), MEMSYS'19 predictive offlining
 
 ## 열린 결정 (진행하며 확정)
 

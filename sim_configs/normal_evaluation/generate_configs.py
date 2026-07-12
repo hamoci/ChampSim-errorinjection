@@ -141,6 +141,22 @@ EPM_PINNING_OFF = {
     "debug": 0
 }
 
+# CARE comparison scheme (HPCA'21, reactive-only): ECC-cache tracking with
+# +30cyc BCH decode on tracked reads; S3 read retires the 2MB page at the
+# same offline cost as the other schemes. Geometry/decode cycles are the
+# paper defaults, spelled out for self-documentation.
+EPM_CARE = {
+    "mode": "CYCLE",
+    "care": True,
+    "care_bch_decode_cycles": 30,
+    "care_ecc_sets": 1024,
+    "care_ecc_ways": 2,
+    "cache_pinning": False,
+    "dynamic_error_latency": False,
+    "error_latency_penalty": 454568,
+    "debug": 0
+}
+
 LLC_WAY_SWEEP_CONFIGS = [
     ("2MB", 2048, 16),
     ("4MB", 4096, 16),
@@ -326,6 +342,23 @@ def gen_6_llc_way_sweep_extra():
     gen_6_llc_way_sweep(LLC_WAY_SWEEP_EXTRA_MAX_WAYS)
 
 
+def gen_8_care_comparison():
+    """Experiment 8: CARE (HPCA'21) comparison scheme x error rate.
+
+    Same 2MB LLC / 2MB page platform as experiment 1; pin_on/pin_off/noerr
+    results from experiments 1/7 are reused as the other scheme axes.
+    """
+    print("\n=== 8. CARE Comparison ===")
+    for rate_name, interval in INTERVAL_MAP.items():
+        epm = copy.deepcopy(EPM_CARE)
+        epm["error_cycle_interval"] = interval
+        exe = f"care_{rate_name}"
+        cfg = make_config(exe, epm=epm)
+        path = os.path.join(BASE_DIR, "8_care_comparison",
+                            f"care_{rate_name}.json")
+        write_config(path, cfg)
+
+
 if __name__ == "__main__":
     gen_1_error_rate_sweep()
     gen_2_retirement_threshold()
@@ -334,4 +367,5 @@ if __name__ == "__main__":
     gen_5_llc_size_sensitivity()
     gen_6_llc_way_sweep()
     gen_7_no_error_way_sweep()
+    gen_8_care_comparison()
     print("\nDone! All configs generated.")
