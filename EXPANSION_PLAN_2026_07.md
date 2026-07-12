@@ -71,6 +71,12 @@
 - **BCH 30 cycles**: 원문 2.5GHz 기준. 4GHz 스케일 시 48 cycles — **열린 결정 #1**, 기본은 30 cycle 유지(보수적)
 - **검증**: (a) noerr 대비 bit-identical (scheme off일 때) (b) 에러 없는 조건에서 CARE == noerr (c) tiny run에서 state 전이 로그 수동 확인
 
+### B-1b. CARE demand-scrub 모델 (2026-07-10 구현, 커밋 77f92ef)
+- 문제: 현행 S1→S2가 애플리케이션 writeback에만 게이트되어 hard line의 86%가 S1에 영구 주차 (mcf 1e-8: 등록 2,259 중 write 확정 325) → retire 희소 → CARE IPC가 noerr 수준으로 과대평가 + coverage 과소평가
+- 해법: `care_demand_scrub` config (기본 off). ON 시 등록 직후 `on_write` 1회 = MC demand scrub의 corrective write 모델링 (원문 fleet은 scrubbing 사용, p.533 각주1; Fig 5 write path가 scrub write에도 그대로 적용됨). 에러 주입 모델 자체는 무변경
+- 검증: scrub off 수정 전후 bit-identical / mcf 30M@1e-8에서 S1→S2 48→779(=전체 등록), retire 2→38, cycle 증가 +16.4M ≈ 38×454,568 산술 일치 / pytest 228 OK
+- 논문 서술: scrub-ON을 주 결과로(실제 서버 RAS 관행), OFF를 민감도로(원문 gem5 평가와 동일 조건). **proactive 평가의 전제조건** — global counter가 retirement당 증가하므로 scrub 없이는 bank-fault 주입만으로 counter 포화 불가
+
 ### B-0b. FreeFault 구현 설계
 - faulty line을 **natural set에 상주 pin**: `handle_fill`의 error-way 분기와 별개로, `is_error_data` && scheme==freefault면 victim 선정에서 해당 라인 제외(lock) + 항상 LLC hit 유지
 - set당 lock 상한(기본 1 way 상당) 초과 시 초과분은 unprotected (원문 lock-control 방식)
