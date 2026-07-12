@@ -142,6 +142,11 @@ private:
 // CARE (HPCA'21) comparison scheme — reactive-only, hard-error-only (see care_ecc_cache.h)
 private:
     bool care_enabled{false};
+    // Demand-scrub model: the CE-detecting read is followed by an MC corrective
+    // write (paper fleet runs memory scrubbing, CARE p.533 fn.1), so registration
+    // immediately drives the S1->S2 hard-error-confirmation step. OFF reproduces
+    // the app-writeback-gated behavior of the paper's gem5 evaluation.
+    bool care_demand_scrub{false};
     uint32_t care_bch_decode_cycles{30};  // for stat printing; latency below is authoritative
     champsim::chrono::clock::duration care_bch_decode_latency{};
     size_t care_ecc_sets{1024};
@@ -319,6 +324,8 @@ public:
     void set_care_bch_decode_latency(champsim::chrono::clock::duration latency) { care_bch_decode_latency = latency; }
     champsim::chrono::clock::duration get_care_bch_decode_latency() const { return care_bch_decode_latency; }
     void set_care_ecc_geometry(size_t sets, size_t ways) { care_ecc_sets = sets; care_ecc_ways = ways; }
+    void set_care_demand_scrub(bool enabled) { care_demand_scrub = enabled; }
+    bool is_care_demand_scrub() const { return care_demand_scrub; }
     size_t get_care_ecc_sets() const { return care_ecc_sets; }
     size_t get_care_ecc_ways() const { return care_ecc_ways; }
 

@@ -460,6 +460,9 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         yield f'  epm.set_care_bch_decode_cycles({care_cycles});'
         yield f'  epm.set_care_bch_decode_latency(champsim::chrono::picoseconds{{{care_cycles * global_clock_period}}});'
         yield f'  epm.set_care_ecc_geometry({care_sets}, {care_ways});'
+        # Emitted only when true: scrub-off care configs keep byte-identical generated code
+        if error_page_manager.get('care_demand_scrub', False):
+            yield '  epm.set_care_demand_scrub(true);'
 
     if 'debug' in error_page_manager:
         yield f'  epm.set_debug({error_page_manager["debug"]});'

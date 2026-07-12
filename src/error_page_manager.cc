@@ -199,6 +199,12 @@ void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx) {
     case CareEccCache::RegisterOutcome::REGISTERED:
         s.care_registered++;
         if (debug == 1) fmt::print("[CARE] REG addr=0x{:x} (S1)\n", cl_addr);
+        if (care_demand_scrub) {
+            // MC demand scrub: corrective write follows the CE-detecting read,
+            // confirming S1->S2 without waiting for an application writeback.
+            care_cache->on_write(cl_addr);
+            if (debug == 1) fmt::print("[CARE] SCRUB addr=0x{:x} (S1->S2)\n", cl_addr);
+        }
         break;
     case CareEccCache::RegisterOutcome::DROPPED:
         s.care_dropped++;

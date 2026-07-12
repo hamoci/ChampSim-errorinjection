@@ -577,6 +577,9 @@ void MEMORY_CONTROLLER::initialize()
     epm.init_care_cache();
     fmt::print("[ERROR_PAGE_MANAGER] CARE scheme: ON (ECC cache {} sets x {} ways, BCH decode {} cycles)\n",
                epm.get_care_ecc_sets(), epm.get_care_ecc_ways(), epm.get_care_bch_decode_cycles());
+    if (epm.is_care_demand_scrub()) {
+      fmt::print("[ERROR_PAGE_MANAGER] CARE demand scrubbing: ON (registration auto-confirms S1->S2)\n");
+    }
   }
 
   if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::ALL_ON) {
