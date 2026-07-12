@@ -350,12 +350,26 @@ def gen_8_care_comparison():
     """
     print("\n=== 8. CARE Comparison ===")
     for rate_name, interval in INTERVAL_MAP.items():
+        # (a) scrub OFF: app-writeback-gated S1->S2 — same condition as the
+        #     paper's gem5 evaluation (kept as sensitivity axis)
         epm = copy.deepcopy(EPM_CARE)
         epm["error_cycle_interval"] = interval
         exe = f"care_{rate_name}"
         cfg = make_config(exe, epm=epm)
         path = os.path.join(BASE_DIR, "8_care_comparison",
                             f"care_{rate_name}.json")
+        write_config(path, cfg)
+
+        # (b) demand scrub ON: MC corrective write confirms S1->S2 at
+        #     registration — real-server RAS behavior, primary result.
+        #     Separate config dir -> separate result dir (no overwrite of (a)).
+        epm = copy.deepcopy(EPM_CARE)
+        epm["error_cycle_interval"] = interval
+        epm["care_demand_scrub"] = True
+        exe = f"care_scrub_{rate_name}"
+        cfg = make_config(exe, epm=epm)
+        path = os.path.join(BASE_DIR, "8_care_comparison_scrub",
+                            f"care_scrub_{rate_name}.json")
         write_config(path, cfg)
 
 
