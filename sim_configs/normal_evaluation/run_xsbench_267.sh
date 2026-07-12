@@ -24,7 +24,7 @@ SIM="${SIM:-250000000}"
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
 
 [[ -f "${TRACE}" ]] || { echo "trace not found: ${TRACE}"; exit 1; }
-TRACE_TAG="$(basename "${TRACE}" | sed 's/\.champsimtrace\.xz$//' | sed 's/\.champsim\.trace\.gz$//')"
+TRACE_TAG="$(basename "${TRACE}" | sed 's/\.champsimtrace\.xz$//' | sed 's/\.champsimtrace\.gz$//' | sed 's/\.champsim\.trace\.gz$//')"
 LOG_FILE="${RESULTS_BASE}/run_xsbench_267_${TRACE_TAG}.log"
 
 # ── Binary lists (must already exist in bin/) ──
