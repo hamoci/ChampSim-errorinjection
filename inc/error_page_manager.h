@@ -25,6 +25,7 @@
 #include "address.h"
 #include "chrono.h"
 #include "champsim.h"
+#include "care_ecc_cache.h"
 
 enum class ErrorPageManagerMode {
     ALL_ON,
@@ -57,6 +58,9 @@ struct PerCpuErrorStats {
     uint64_t already_known{0};        // ALREADY_KNOWN results (pinning ON)
     uint64_t retirements{0};          // PAGE_RETIRED results (pinning ON)
     uint64_t baseline_retirements{0}; // retirements triggered via baseline path (pinning OFF)
+    uint64_t care_registered{0};      // CARE: new ECC cache registrations (scheme == care)
+    uint64_t care_dropped{0};         // CARE: errors refused by full ECC cache set
+    uint64_t care_retirements{0};     // CARE: page retirements triggered by S3 reads
 };
 
 class ErrorPageManager {
@@ -134,6 +138,16 @@ private:
     size_t baseline_retirement_threshold{1};  // retire (reset) page after this many errors
     std::unordered_map<uint64_t, uint32_t> baseline_page_error_counts;  // page_base → error count
     uint64_t stat_baseline_retirement_count{0};
+
+// CARE (HPCA'21) comparison scheme — reactive-only, hard-error-only (see care_ecc_cache.h)
+private:
+    bool care_enabled{false};
+    uint32_t care_bch_decode_cycles{30};  // for stat printing; latency below is authoritative
+    champsim::chrono::clock::duration care_bch_decode_latency{};
+    size_t care_ecc_sets{1024};
+    size_t care_ecc_ways{2};
+    std::unique_ptr<CareEccCache> care_cache;
+    uint64_t stat_care_retirement_count{0};
 
 // Error Statistics
 private:
@@ -294,6 +308,33 @@ public:
     bool record_baseline_error(uint64_t pa);
     uint64_t get_stat_baseline_retirement_count() const { return stat_baseline_retirement_count; }
 
+    // ============================================================
+    // CARE scheme API (called from DRAM_CHANNEL::service_packet)
+    // ============================================================
+
+    void set_care_enabled(bool enabled) { care_enabled = enabled; }
+    bool is_care_enabled() const { return care_enabled; }
+    void set_care_bch_decode_cycles(uint32_t cycles) { care_bch_decode_cycles = cycles; }
+    uint32_t get_care_bch_decode_cycles() const { return care_bch_decode_cycles; }
+    void set_care_bch_decode_latency(champsim::chrono::clock::duration latency) { care_bch_decode_latency = latency; }
+    champsim::chrono::clock::duration get_care_bch_decode_latency() const { return care_bch_decode_latency; }
+    void set_care_ecc_geometry(size_t sets, size_t ways) { care_ecc_sets = sets; care_ecc_ways = ways; }
+    size_t get_care_ecc_sets() const { return care_ecc_sets; }
+    size_t get_care_ecc_ways() const { return care_ecc_ways; }
+
+    // Construct the ECC cache after all config setters ran (MEMORY_CONTROLLER::initialize)
+    void init_care_cache();
+
+    // Every DRAM read (first service of the packet): decode latency / retirement decision.
+    CareEccCache::ReadOutcome care_on_read(uint64_t pa, uint32_t cpu_idx);
+    // Every DRAM write (first service): S1→S2 confirmation.
+    void care_on_write(uint64_t pa);
+    // Injected error consumed by a read packet: registration attempt (no latency).
+    void care_on_injected_error(uint64_t pa, uint32_t cpu_idx);
+
+    uint64_t get_stat_care_retirement_count() const { return stat_care_retirement_count; }
+    void print_care_stats() const;
+
     // Update cycle error counter (called from operate() every cycle)
     void update_cycle_errors(champsim::chrono::clock::time_point current_time) {
         if (error_cycle_interval == 0 || cpu_clock_period.count() == 0) {
@@ -360,11 +401,13 @@ public:
     void print_error_pages() const;
 
 private:
-    // Internal helpers
-    void retire_page(uint64_t page_base);
+    // Internal helpers.
+    // queue_llc_sweep=false: CARE has no LLC error ways and the sweep consumer
+    // (cache.cc) is pinning-gated — queueing would only grow the vector unbounded.
+    void retire_page(uint64_t page_base, bool queue_llc_sweep = true);
     static uint64_t get_page_base_pa(uint64_t pa) {
-        // 2MB aligned: clear lower 21 bits
-        return pa & ~((1ULL << 21) - 1);
+        // 2MB aligned (single source of the page-base mask: care_ecc_cache.h)
+        return pa & CareEccCache::PAGE_BASE_MASK;
     }
     static uint64_t get_cache_line_addr(uint64_t pa) {
         // Cache-line aligned: clear lower 6 bits

@@ -444,6 +444,23 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         yield f'  epm.set_retirement_threshold({error_page_manager["retirement_threshold"]});'
     if 'baseline_retirement_threshold' in error_page_manager:
         yield f'  epm.set_baseline_retirement_threshold({error_page_manager["baseline_retirement_threshold"]});'
+
+    # CARE comparison scheme (HPCA'21) configuration.
+    # Emitted only when care is enabled: existing configs keep byte-identical
+    # generated code (in-code defaults already match the disabled state).
+    if error_page_manager.get('care', False):
+        care_sets = error_page_manager.get('care_ecc_sets', 1024)
+        care_ways = error_page_manager.get('care_ecc_ways', 2)
+        care_cycles = error_page_manager.get('care_bch_decode_cycles', 30)
+        if care_sets <= 0 or (care_sets & (care_sets - 1)) != 0:
+            raise ValueError(f'error_page_manager.care_ecc_sets must be a power of two, got {care_sets}')
+        if care_ways <= 0:
+            raise ValueError(f'error_page_manager.care_ecc_ways must be positive, got {care_ways}')
+        yield '  epm.set_care_enabled(true);'
+        yield f'  epm.set_care_bch_decode_cycles({care_cycles});'
+        yield f'  epm.set_care_bch_decode_latency(champsim::chrono::picoseconds{{{care_cycles * global_clock_period}}});'
+        yield f'  epm.set_care_ecc_geometry({care_sets}, {care_ways});'
+
     if 'debug' in error_page_manager:
         yield f'  epm.set_debug({error_page_manager["debug"]});'
 

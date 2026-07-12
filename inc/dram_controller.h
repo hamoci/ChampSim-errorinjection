@@ -108,6 +108,12 @@ struct DRAM_CHANNEL final : public champsim::operable {
     bool scheduled = false;
     bool forward_checked = false;
 
+    // CARE scheme memo (inert when care disabled): swap_write_mode can deschedule
+    // and re-service the same packet; CARE state transitions must run exactly once
+    // per architectural access, and the computed latency must survive re-service.
+    bool care_done = false;
+    champsim::chrono::clock::duration care_latency{};
+
     uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
 
     uint32_t pf_metadata = 0;

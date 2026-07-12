@@ -5,6 +5,7 @@
 #include <random>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 // Static member initialization
 std::unique_ptr<ErrorPageManager> ErrorPageManager::instance = nullptr;
@@ -73,7 +74,7 @@ ErrorRecordResult ErrorPageManager::record_error(uint64_t pa) {
     }
 }
 
-void ErrorPageManager::retire_page(uint64_t page_base) {
+void ErrorPageManager::retire_page(uint64_t page_base, bool queue_llc_sweep) {
     if (debug == 1) {
         fmt::print("[ERROR_REC]   RETIRE page=0x{:x}:\n", page_base);
     }
@@ -87,7 +88,7 @@ void ErrorPageManager::retire_page(uint64_t page_base) {
 
     // 2. Move error addresses of this page from error_addresses → retired_error_addresses
     //    (set-based, unique-cl semantics; bounded by working set so snapshot is time-stable)
-    uint64_t page_mask = ~((1ULL << 21) - 1);
+    constexpr uint64_t page_mask = CareEccCache::PAGE_BASE_MASK;
     size_t removed = 0;
     for (auto it = error_addresses.begin(); it != error_addresses.end(); ) {
         if ((*it & page_mask) == page_base) {
@@ -104,10 +105,12 @@ void ErrorPageManager::retire_page(uint64_t page_base) {
     }
 
     // 3. Queue page for LLC error way sweep
-    pending_retirement_pages.push_back(page_base);
-    if (debug == 1) {
-        fmt::print("[ERROR_REC]     3. pending_retirement_pages: queued (total pending={})\n",
-                   pending_retirement_pages.size());
+    if (queue_llc_sweep) {
+        pending_retirement_pages.push_back(page_base);
+        if (debug == 1) {
+            fmt::print("[ERROR_REC]     3. pending_retirement_pages: queued (total pending={})\n",
+                       pending_retirement_pages.size());
+        }
     }
 }
 
@@ -132,6 +135,118 @@ bool ErrorPageManager::record_baseline_error(uint64_t pa) {
         return true;
     }
     return false;
+}
+
+// ============================================================
+// CARE scheme (HPCA'21) — reactive-only, hard-error-only
+// ============================================================
+
+void ErrorPageManager::init_care_cache() {
+    // Fail fast with a config-pointing message; the constructor's assert would
+    // vanish under -DNDEBUG and the set-index mask would silently alias.
+    if (care_ecc_sets == 0 || (care_ecc_sets & (care_ecc_sets - 1)) != 0 || care_ecc_ways == 0) {
+        fmt::print("[ERROR_PAGE_MANAGER] FATAL: care_ecc_sets must be a nonzero power of two and care_ecc_ways nonzero (got {} x {})\n",
+                   care_ecc_sets, care_ecc_ways);
+        std::abort();
+    }
+    care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways);
+}
+
+CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t cpu_idx) {
+    uint64_t cl_addr = get_cache_line_addr(pa);
+    auto out = care_cache->on_read(cl_addr);
+
+    if (debug == 1 && out.promoted_s3) {
+        fmt::print("[CARE] S2->S3 addr=0x{:x} (hard error confirmed)\n", cl_addr);
+    }
+
+    if (out.retire) {
+        uint64_t page_base = get_page_base_pa(pa);
+        size_t invalidated = care_cache->invalidate_page(page_base);
+        retire_page(page_base, /*queue_llc_sweep=*/false);  // coverage move + counter erase; no sweep consumer under CARE
+        stat_care_retirement_count++;
+        per_cpu_error_stats[cpu_idx].care_retirements++;
+        if (debug == 1) {
+            fmt::print("[CARE] RETIRE page=0x{:x} trigger_addr=0x{:x} ecc_entries_invalidated={}\n",
+                       page_base, cl_addr, invalidated);
+        }
+    }
+    return out;
+}
+
+void ErrorPageManager::care_on_write(uint64_t pa) {
+    uint64_t cl_addr = get_cache_line_addr(pa);
+    bool confirmed = care_cache->on_write(cl_addr);
+    if (debug == 1 && confirmed) {
+        fmt::print("[CARE] S1->S2 addr=0x{:x} (write confirmation)\n", cl_addr);
+    }
+}
+
+void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx) {
+    uint64_t cl_addr = get_cache_line_addr(pa);
+
+    // Ground-truth faulty-line set for the Protection Coverage metric (D8).
+    // LLC pinning consumers of error_addresses are all is_cache_pinning_enabled()-gated.
+    // Note: like the baseline path, a line of an already-retired page re-enters this
+    // set on re-injection while staying in retired_error_addresses — a shared
+    // simulation artifact across schemes (coverage double-count, plan D5).
+    error_addresses.insert(cl_addr);
+
+    auto& s = per_cpu_error_stats[cpu_idx];
+    s.errors_absorbed++;
+
+    switch (care_cache->on_error(cl_addr)) {
+    case CareEccCache::RegisterOutcome::REGISTERED:
+        s.care_registered++;
+        if (debug == 1) fmt::print("[CARE] REG addr=0x{:x} (S1)\n", cl_addr);
+        break;
+    case CareEccCache::RegisterOutcome::DROPPED:
+        s.care_dropped++;
+        if (debug == 1) fmt::print("[CARE] DROP addr=0x{:x} (ECC cache set full)\n", cl_addr);
+        break;
+    case CareEccCache::RegisterOutcome::ALREADY_TRACKED:
+        if (debug == 1) fmt::print("[CARE] KNOWN addr=0x{:x} (already tracked)\n", cl_addr);
+        break;
+    }
+}
+
+void ErrorPageManager::print_care_stats() const {
+    if (!care_cache) {
+        fmt::print("\n[CARE] ECC cache not initialized (no stats)\n");
+        return;
+    }
+    const auto& s = care_cache->stats();
+    size_t capacity = care_ecc_sets * care_ecc_ways;
+    size_t resident = care_cache->occupancy();
+    uint64_t error_events = s.registered + s.errors_on_tracked + s.dropped;
+
+    fmt::print("\n[CARE] ========== CARE Scheme Statistics ==========\n");
+    fmt::print("[CARE]\n");
+    fmt::print("[CARE] [Configuration]\n");
+    fmt::print("[CARE]   ECC Cache Geometry:             {} sets x {} ways ({} blocks)\n", care_ecc_sets, care_ecc_ways, capacity);
+    fmt::print("[CARE]   BCH Decode Latency:             {} CPU cycles\n", care_bch_decode_cycles);
+    fmt::print("[CARE]\n");
+    fmt::print("[CARE] [Error Events]\n");
+    fmt::print("[CARE]   Total Injected Error Events:    {}\n", error_events);
+    fmt::print("[CARE]     Registrations (new S1):       {}\n", s.registered);
+    fmt::print("[CARE]     On Already-Tracked Blocks:    {}\n", s.errors_on_tracked);
+    fmt::print("[CARE]     Dropped (set full):           {}\n", s.dropped);
+    fmt::print("[CARE]\n");
+    fmt::print("[CARE] [Tracked-Block Accesses]\n");
+    fmt::print("[CARE]   BCH Decode Reads (+{} cyc):     {}\n", care_bch_decode_cycles, s.decode_reads);
+    fmt::print("[CARE]   S1->S2 Write Confirmations:     {}\n", s.writes_s1_to_s2);
+    fmt::print("[CARE]   S2->S3 Hard Confirmations:      {}\n", s.reads_s2_to_s3);
+    fmt::print("[CARE]\n");
+    fmt::print("[CARE] [Retirement]\n");
+    fmt::print("[CARE]   Pages Retired (reactive):       {}\n", stat_care_retirement_count);
+    fmt::print("[CARE]   ECC Entries Invalidated:        {}\n", s.invalidated_entries);
+    fmt::print("[CARE]\n");
+    fmt::print("[CARE] [Final ECC Cache State]\n");
+    fmt::print("[CARE]   Resident Entries:               {} / {} ({:.2f}%)\n", resident, capacity,
+               capacity > 0 ? 100.0 * static_cast<double>(resident) / static_cast<double>(capacity) : 0.0);
+    fmt::print("[CARE] ============================================\n");
+    // Per-CPU care attribution is printed by print_per_cpu_error_stats (gated line)
+    // so each CPU appears in exactly one authoritative per-CPU block.
 }
 
 void ErrorPageManager::print_error_stats() const {
@@ -191,6 +306,12 @@ void ErrorPageManager::print_per_cpu_error_stats() const {
         fmt::print("[ERROR]   CPU {}: absorbed={} first={} added={} known={} retired={} baseline_retired={}\n",
                    cpu_idx, s.errors_absorbed, s.first_errors, s.added_errors,
                    s.already_known, s.retirements, s.baseline_retirements);
+        // Existing line above stays byte-identical for non-CARE runs; care fields
+        // appear on a separate gated line only.
+        if (care_enabled) {
+            fmt::print("[ERROR]   CPU {}: care_registered={} care_dropped={} care_retired={}\n",
+                       cpu_idx, s.care_registered, s.care_dropped, s.care_retirements);
+        }
     }
 }
 

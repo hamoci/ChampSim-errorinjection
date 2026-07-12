@@ -104,5 +104,9 @@ def error_page_manager_defaults():
         'max_error_ways_per_set': 8,
         'retirement_threshold': 32,
         'baseline_retirement_threshold': 1,
+        'care': False,
+        'care_bch_decode_cycles': 30,
+        'care_ecc_sets': 1024,
+        'care_ecc_ways': 2,
         'debug': 0,
     }

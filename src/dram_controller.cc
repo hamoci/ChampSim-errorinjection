@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cfenv>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <fmt/core.h>
 
@@ -383,18 +384,64 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       dram_access_count++;
       // Hamoci's Error Check - Apply error latency based on mode
       auto error_latency = champsim::chrono::clock::duration{};
+      auto& epm = ErrorPageManager::get_instance();
+      uint64_t raw_pa = pkt->value().address.to<uint64_t>();
+
+      // CARE per-access hook — must run BEFORE the injection branch so the read that
+      // registers a block pays no decode latency (BCH encoding is background, Fig.5).
+      // The !warmup guard is a redundant safety net: during warmup operate() drains
+      // and resets RQ/WQ before service_packet runs, so packets never get here.
+      // care_done memo: swap_write_mode can deschedule and re-service this packet;
+      // transitions must run once, and the latency must survive the re-service.
+      const bool care_first_service = !pkt->value().care_done;
+      bool care_retired_now = false;
+      if (!warmup && epm.is_care_enabled()) {
+        if (pkt->value().care_done) {
+          error_latency = pkt->value().care_latency;
+        } else {
+          if (pkt->value().type == access_type::WRITE) {
+            epm.care_on_write(raw_pa);
+          } else {
+            auto care_read = epm.care_on_read(raw_pa, pkt->value().cpu);
+            care_retired_now = care_read.retire;
+            if (care_read.retire) {
+              // Page-offline cost, same rule as the baseline retirement branch below
+              error_latency = (pkt->value().type == access_type::TRANSLATION) ? epm.get_pte_error_latency() : epm.get_error_latency();
+            } else if (care_read.tracked) {
+              error_latency = epm.get_care_bch_decode_latency();
+            }
+            if (debug_dynamic_error_latency && error_latency > champsim::chrono::clock::duration{}) {
+              fmt::print("[ERR_LAT][CYCLE][CARE][{}] addr=0x{:x} cpu={} latency={} cycles\n",
+                         care_read.retire ? "RETIRE" : "BCH", raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
+            }
+          }
+          pkt->value().care_done = true;
+          pkt->value().care_latency = error_latency;
+        }
+      }
 
       // CYCLE mode: Consume error from counter
       // Only inject on read paths (RQ): writebacks (WQ, type==WRITE) don't fill into LLC,
       // so recording an error there leaves the line DRAM-exposed instead of pinned.
       // Skipping WRITE keeps the pending error in the counter until the next read services it.
       if (pkt->value().type != access_type::WRITE &&
-               ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE &&
-               ErrorPageManager::get_instance().consume_cycle_error()) {
-        auto& epm = ErrorPageManager::get_instance();
-        uint64_t raw_pa = pkt->value().address.to<uint64_t>();
+               ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::CYCLE) {
 
-        if (epm.is_cache_pinning_enabled()) {
+        if (epm.is_care_enabled()) {
+          // CARE consumes only on the packet's FIRST service: a swap_write_mode
+          // deschedule must not drain a second pending error for the same access.
+          // A retiring read also defers consumption to the next read (same rule as
+          // the WRITE skip above) so a just-retired line is not revived in the
+          // same service. The pinning/baseline branch below keeps the pre-existing
+          // re-service consumption artifact untouched (bit-identical constraint).
+          if (care_first_service && !care_retired_now && epm.consume_cycle_error()) {
+            // SEC-DED corrects the block inline and registration/encoding is
+            // background work — the consuming read itself pays nothing (plan D2).
+            epm.care_on_injected_error(raw_pa, pkt->value().cpu);
+            epm.record_error_access();
+          }
+        } else if (ErrorPageManager::get_instance().consume_cycle_error()) {
+          if (epm.is_cache_pinning_enabled()) {
           // LLC Pinning ON: Dual-Layer Recording (PERT) + dynamic/fixed latency per case
           ErrorRecordResult result = epm.record_error(raw_pa);
           epm.record_error_result_cpu(pkt->value().cpu, result);
@@ -458,8 +505,9 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
                        access_type_names.at(champsim::to_underlying(pkt->value().type)),
                        raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
           }
+          }
+          epm.record_error_access();
         }
-        epm.record_error_access();
       }
 
       // this bank is now busy
@@ -514,7 +562,23 @@ void MEMORY_CONTROLLER::initialize()
   fmt::print("[ERROR_PAGE_MANAGER] Dynamic error latency: {}\n",
              ErrorPageManager::get_instance().is_dynamic_error_latency_enabled() ? "ON" : "OFF (fixed)");
   fmt::print("[ERROR_PAGE_MANAGER] Random seed: 54321 (fixed for preload reproducibility)\n");
-  
+
+  // CARE comparison scheme setup — every line below is gated on is_care_enabled()
+  // so existing configs keep byte-identical stdout.
+  if (ErrorPageManager::get_instance().is_care_enabled()) {
+    auto& epm = ErrorPageManager::get_instance();
+    if (epm.is_cache_pinning_enabled()) {
+      fmt::print("[ERROR_PAGE_MANAGER] FATAL: 'care' and 'cache_pinning' are mutually exclusive schemes\n");
+      std::abort();
+    }
+    if (epm.get_mode() != ErrorPageManagerMode::CYCLE) {
+      fmt::print("[ERROR_PAGE_MANAGER] WARNING: CARE enabled but error mode is not CYCLE — no injection, CARE stays inert\n");
+    }
+    epm.init_care_cache();
+    fmt::print("[ERROR_PAGE_MANAGER] CARE scheme: ON (ECC cache {} sets x {} ways, BCH decode {} cycles)\n",
+               epm.get_care_ecc_sets(), epm.get_care_ecc_ways(), epm.get_care_bch_decode_cycles());
+  }
+
   if (ErrorPageManager::get_instance().get_mode() == ErrorPageManagerMode::ALL_ON) {
     uint64_t all_error_pages_count = this->size().count() >> LOG2_PAGE_SIZE;
     ErrorPageManager::get_instance().all_error_pages_on(all_error_pages_count);
