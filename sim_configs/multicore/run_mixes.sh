@@ -39,6 +39,12 @@ BINARIES=(
   champsim_4core_8mb_pin_1e-6
   champsim_4core_8mb_pin_1e-7
   champsim_4core_8mb_pin_1e-8
+  champsim_4core_8mb_care_1e-6
+  champsim_4core_8mb_care_1e-7
+  champsim_4core_8mb_care_1e-8
+  champsim_4core_8mb_care_scrub_1e-6
+  champsim_4core_8mb_care_scrub_1e-7
+  champsim_4core_8mb_care_scrub_1e-8
 )
 
 # SPEC trace filenames

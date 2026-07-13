@@ -153,6 +153,20 @@ EPM_PINNING_OFF = {
     "debug": 0
 }
 
+# CARE comparison scheme (single MC-level ECC cache shared by all cores).
+# care_demand_scrub toggles the CARE-AW / CARE-DS variants (see exp 8).
+EPM_CARE = {
+    "mode": "CYCLE",
+    "care": True,
+    "care_bch_decode_cycles": 30,
+    "care_ecc_sets": 1024,
+    "care_ecc_ways": 2,
+    "cache_pinning": False,
+    "dynamic_error_latency": False,
+    "error_latency_penalty": 454568,
+    "debug": 0
+}
+
 
 def write_config(path, config):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -190,6 +204,21 @@ def main():
         cfg = make_config(f"champsim_4core_8mb_pin_{rate_name}", epm)
         write_config(os.path.join(BASE_DIR, "pinning_on",
                                   f"4core_8MBLLC_2MBPage_pin_{rate_name}.json"), cfg)
+
+        # CARE (scrub OFF = CARE-AW)
+        epm = copy.deepcopy(EPM_CARE)
+        epm["error_cycle_interval"] = interval
+        cfg = make_config(f"champsim_4core_8mb_care_{rate_name}", epm)
+        write_config(os.path.join(BASE_DIR, "care",
+                                  f"4core_8MBLLC_2MBPage_care_{rate_name}.json"), cfg)
+
+        # CARE + demand scrub (CARE-DS)
+        epm = copy.deepcopy(EPM_CARE)
+        epm["error_cycle_interval"] = interval
+        epm["care_demand_scrub"] = True
+        cfg = make_config(f"champsim_4core_8mb_care_scrub_{rate_name}", epm)
+        write_config(os.path.join(BASE_DIR, "care_scrub",
+                                  f"4core_8MBLLC_2MBPage_care_scrub_{rate_name}.json"), cfg)
 
     print("Done.")
 
