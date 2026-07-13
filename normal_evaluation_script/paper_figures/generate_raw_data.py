@@ -31,18 +31,26 @@ REPO_RESULTS = os.path.normpath(
 OUTPUT_XLSX = os.path.join(SCRIPT_DIR, "raw_data.xlsx")
 
 
-def resolve_sources(spec_name, gap_name):
-    """Return [(dir, ...), ...] of existing result dirs for an experiment:
-    the SPEC dir plus the GAP dir (first location that exists)."""
+# Non-SPEC suites live in per-suite suffixed dirs (results tree convention):
+# _gap (19 GAP traces), _xsbench / _llama / _redis (added real-world workloads).
+SUITE_SUFFIXES = ("_gap", "_xsbench", "_llama", "_redis")
+
+
+def resolve_sources(base_name, gap_name=None):
+    """Return existing result dirs for an experiment: the SPEC dir (snapshot)
+    plus each per-suite dir <base_name><suffix> (first location that exists,
+    preferring the paper_figures snapshot over the repo results tree)."""
     dirs = []
-    spec = os.path.join(RESULTS_ROOT, spec_name)
+    spec = os.path.join(RESULTS_ROOT, base_name)
     if os.path.isdir(spec):
         dirs.append(spec)
-    for cand in (os.path.join(RESULTS_ROOT, gap_name),
-                 os.path.join(REPO_RESULTS, gap_name)):
-        if os.path.isdir(cand):
-            dirs.append(cand)
-            break
+    for suffix in SUITE_SUFFIXES:
+        name = base_name + suffix
+        for cand in (os.path.join(RESULTS_ROOT, name),
+                     os.path.join(REPO_RESULTS, name)):
+            if os.path.isdir(cand):
+                dirs.append(cand)
+                break
     return dirs
 
 
@@ -213,7 +221,7 @@ def threshold_row(m, workload, pin_mode, rate, threshold):
 
 
 def collect_threshold_sweep():
-    dirs = resolve_sources("2_retirement_threshold", "2_retirement_threshold_gap")
+    dirs = resolve_sources("2_retirement_threshold")
     rows = []
     for src, fname in iter_result_files(dirs):
         match = RE_RETIRE.match(fname)
@@ -233,7 +241,7 @@ def collect_threshold_sweep():
 
 
 def collect_max_error_way_sweep():
-    dirs = resolve_sources("6_llc_way_sweep", "6_llc_way_sweep_gap")
+    dirs = resolve_sources("6_llc_way_sweep")
     rows = []
     for src, fname in iter_result_files(dirs):
         match = RE_SWEEP.match(fname)
@@ -255,7 +263,7 @@ def collect_max_error_way_sweep():
 
 
 def collect_noerr_way_sweep():
-    dirs = resolve_sources("7_no_error_way_sweep", "7_no_error_way_sweep_gap")
+    dirs = resolve_sources("7_no_error_way_sweep")
     rows = []
     for src, fname in iter_result_files(dirs):
         match = RE_NOERR.match(fname)
