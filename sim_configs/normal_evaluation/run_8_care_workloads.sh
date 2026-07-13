@@ -9,10 +9,13 @@
 # Usage:
 #   MAX_PARALLEL=38 ./run_8_care_workloads.sh trace1 [trace2 ...]
 #   (trace paths relative to repo or absolute)
+#   GROUP_SUFFIX=_gap : write into 8_care_comparison_gap{,_scrub_gap} dirs
+#   (mirrors the 2_retirement_threshold_gap convention for GAP results)
 set -euo pipefail
 
 CHAMPSIM_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 RESULTS_BASE="${RESULTS_BASE:-${CHAMPSIM_DIR}/results/normal_evaluation}"
+GROUP_SUFFIX="${GROUP_SUFFIX:-}"
 
 WARMUP="${WARMUP:-50000000}"
 SIM="${SIM:-250000000}"
@@ -20,8 +23,8 @@ MAX_PARALLEL="${MAX_PARALLEL:-4}"
 
 [[ $# -ge 1 ]] || { echo "usage: $0 <trace> [trace ...]"; exit 1; }
 
-LOG_FILE="${RESULTS_BASE}/run_8_care_workloads.log"
-mkdir -p "${RESULTS_BASE}/8_care_comparison" "${RESULTS_BASE}/8_care_comparison_scrub"
+LOG_FILE="${RESULTS_BASE}/run_8_care_workloads${GROUP_SUFFIX}.log"
+mkdir -p "${RESULTS_BASE}/8_care_comparison${GROUP_SUFFIX}" "${RESULTS_BASE}/8_care_comparison_scrub${GROUP_SUFFIX}"
 
 log_msg() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"; }
 fmt_elapsed() { local s=$1; printf "%d:%02d:%02d" $((s/3600)) $((s%3600/60)) $((s%60)); }
@@ -44,7 +47,7 @@ for TRACE in "$@"; do
   TRACE_TAG="$(basename "${TRACE}" | sed 's/\.champsimtrace\.xz$//' | sed 's/\.champsimtrace\.gz$//' | sed 's/\.champsim\.trace\.gz$//')"
 
   for rate in 1e-5 1e-6 1e-7 1e-8; do
-    for variant in "care:8_care_comparison" "care_scrub:8_care_comparison_scrub"; do
+    for variant in "care:8_care_comparison${GROUP_SUFFIX}" "care_scrub:8_care_comparison_scrub${GROUP_SUFFIX}"; do
       binary="${variant%%:*}_${rate}"
       group="${variant##*:}"
       if [[ ! -x "${CHAMPSIM_DIR}/bin/${binary}" ]]; then
