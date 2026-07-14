@@ -112,13 +112,16 @@ def extract_workload(trace: str) -> str:
 
 def suite_of(workload: str) -> str:
     """SPEC workloads start with the CPU2017 number (e.g. 602.gcc_s); GAP ids
-    are kernel-graph pairs (bc-12, bfs-3, ...); anything else is one of the
-    added real-world workloads (xsbench / llama2 / redis-ycsb) -> NEW."""
+    are kernel-graph pairs (bc-12, bfs-3, ...); the added real-world workloads
+    are labeled by their own name (xsbench / llama2.c / redis)."""
     w = str(workload)
     if re.match(r"^\d", w):
         return "SPEC"
     if re.match(r"^(bc|bfs|cc|pr|sssp)-", w):
         return "GAP"
+    for prefix in ("xsbench", "llama2.c", "redis"):
+        if w.startswith(prefix):
+            return prefix
     return "NEW"
 
 
