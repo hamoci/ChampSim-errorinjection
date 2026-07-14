@@ -270,3 +270,34 @@ TEST_CASE("Proactive victim list: distinct resident pages of the triggering set"
   REQUIRE(std::find(pages.begin(), pages.end(), page_a) != pages.end());
   REQUIRE(std::find(pages.begin(), pages.end(), page_b) != pages.end());
 }
+
+TEST_CASE("Proactive OR variant: four same-bank retirements trigger via bias alone")
+{
+  CareEccCache ecc{1, 8, /*proactive_enabled=*/true, /*or_trigger=*/true};
+
+  for (int i = 0; i < 3; ++i) {
+    auto out = retire_sequence(ecc, line_in_set(0, i), /*bank=*/0);
+    REQUIRE(out.retire);
+    REQUIRE_FALSE(out.proactive); // counter at 3*(i+1) <= 9 < 12
+    ecc.invalidate_page(line_in_set(0, i) & CareEccCache::PAGE_BASE_MASK);
+  }
+  REQUIRE(ecc.global_counter(0, 0) == 9);
+
+  auto out = retire_sequence(ecc, line_in_set(0, 3), /*bank=*/0);
+  REQUIRE(out.retire);
+  REQUIRE(out.proactive); // 12: bias 12-0 >= 12 fires without saturation (OR)
+  REQUIRE(ecc.stats().proactive_triggers == 1);
+  REQUIRE(ecc.global_counter(0, 0) == 0); // trigger closes the round
+}
+
+TEST_CASE("Proactive AND default: bias at 12 without saturation does not trigger")
+{
+  CareEccCache ecc{1, 8, /*proactive_enabled=*/true}; // paper AND condition
+
+  for (int i = 0; i < 4; ++i) {
+    auto out = retire_sequence(ecc, line_in_set(0, i), /*bank=*/0);
+    REQUIRE_FALSE(out.proactive);
+    ecc.invalidate_page(line_in_set(0, i) & CareEccCache::PAGE_BASE_MASK);
+  }
+  REQUIRE(ecc.global_counter(0, 0) == 12); // biased but not saturated: no trigger, no reset
+}

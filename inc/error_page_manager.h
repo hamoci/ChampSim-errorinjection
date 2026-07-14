@@ -151,6 +151,9 @@ private:
     // cell-fault injection the trigger provably never fires (see care_ecc_cache.h);
     // peak-margin stats are printed as the measured evidence.
     bool care_proactive{false};
+    // Exploratory: relax the proactive trigger to saturation OR bias
+    // (paper condition is AND). Off by default; see care_ecc_cache.h.
+    bool care_proactive_or{false};
     uint32_t care_bch_decode_cycles{30};  // for stat printing; latency below is authoritative
     champsim::chrono::clock::duration care_bch_decode_latency{};
     size_t care_ecc_sets{1024};
@@ -333,6 +336,8 @@ public:
     bool is_care_demand_scrub() const { return care_demand_scrub; }
     void set_care_proactive(bool enabled) { care_proactive = enabled; }
     bool is_care_proactive() const { return care_proactive; }
+    void set_care_proactive_or(bool enabled) { care_proactive_or = enabled; }
+    bool is_care_proactive_or() const { return care_proactive_or; }
     size_t get_care_ecc_sets() const { return care_ecc_sets; }
     size_t get_care_ecc_ways() const { return care_ecc_ways; }
 

@@ -107,6 +107,7 @@ def error_page_manager_defaults():
         'care': False,
         'care_demand_scrub': False,
         'care_proactive': False,
+        'care_proactive_or': False,
         'care_bch_decode_cycles': 30,
         'care_ecc_sets': 1024,
         'care_ecc_ways': 2,

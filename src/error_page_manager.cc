@@ -149,7 +149,7 @@ void ErrorPageManager::init_care_cache() {
                    care_ecc_sets, care_ecc_ways);
         std::abort();
     }
-    care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways, care_proactive);
+    care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways, care_proactive, care_proactive_or);
 }
 
 CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t cpu_idx) {

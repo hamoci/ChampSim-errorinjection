@@ -90,7 +90,10 @@ public:
   static constexpr uint8_t PROACTIVE_BIAS_MIN = 12;   // paper: 95% confidence bound
   static constexpr uint32_t LOCAL_CONTRIB_CAP = 3;    // paper: 2-bit local counters
 
-  CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled = false);
+  // or_trigger relaxes the paper's trigger (saturation AND bias) to
+  // saturation OR bias — exploratory only, not the paper's condition.
+  CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled = false,
+               bool or_trigger = false);
 
   // Every DRAM read of this 64B-aligned line (first service only).
   ReadOutcome on_read(uint64_t line_addr);
@@ -145,6 +148,7 @@ private:
   std::size_t sets_;
   std::size_t ways_;
   bool proactive_enabled_;
+  bool or_trigger_;
   std::vector<Entry> entries_; // sets_ x ways_, row-major
   std::vector<std::array<uint8_t, NUM_GLOBAL_COUNTERS>> gcounters_; // per set
   Stats stats_{};

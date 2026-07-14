@@ -3,8 +3,9 @@
 #include <algorithm>
 #include <cassert>
 
-CareEccCache::CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled)
-    : sets_(num_sets), ways_(num_ways), proactive_enabled_(proactive_enabled), entries_(num_sets * num_ways), gcounters_(num_sets)
+CareEccCache::CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled, bool or_trigger)
+    : sets_(num_sets), ways_(num_ways), proactive_enabled_(proactive_enabled), or_trigger_(or_trigger), entries_(num_sets * num_ways),
+      gcounters_(num_sets)
 {
   assert(sets_ > 0 && (sets_ & (sets_ - 1)) == 0); // power of two (set_index masking)
   assert(ways_ > 0);
@@ -70,13 +71,19 @@ bool CareEccCache::account_retirement(std::size_t set, const Entry& e)
   stats_.gc_peak_value = std::max(stats_.gc_peak_value, *max_it);
   stats_.gc_peak_bias = std::max(stats_.gc_peak_bias, bias);
 
-  if (*max_it < GLOBAL_COUNTER_MAX)
+  bool saturated = *max_it >= GLOBAL_COUNTER_MAX;
+  bool biased = bias >= PROACTIVE_BIAS_MIN;
+  // Paper condition: saturated AND biased. Exploratory OR variant fires on
+  // either signal alone (effectively lowering the same-counter requirement
+  // from 5 to 4 retirements when the set's minimum counter is 0).
+  bool triggered = or_trigger_ ? (saturated || biased) : (saturated && biased);
+
+  if (!triggered && !saturated)
     return false; // round still accumulating
 
-  bool triggered = bias >= PROACTIVE_BIAS_MIN;
   if (triggered)
     stats_.proactive_triggers++;
-  gc.fill(0);
+  gc.fill(0); // trigger, or saturation without bias: close the accounting round
   stats_.gc_resets++;
   return triggered;
 }
