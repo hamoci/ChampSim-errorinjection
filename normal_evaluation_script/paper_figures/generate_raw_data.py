@@ -220,6 +220,11 @@ def threshold_row(m, workload, pin_mode, rate, threshold):
     ]
 
 
+# Canonical sweep points. 64/256 result files exist from one-off extreme-value
+# tests and are deliberately excluded from the sheet.
+THRESHOLD_SWEEP_POINTS = {2, 4, 8, 16, 32}
+
+
 def collect_threshold_sweep():
     dirs = resolve_sources("2_retirement_threshold")
     rows = []
@@ -229,6 +234,8 @@ def collect_threshold_sweep():
             continue
         pin_mode = match.group("mode")
         threshold = int(match.group("threshold"))
+        if threshold not in THRESHOLD_SWEEP_POINTS:
+            continue
         rate = match.group("rate")
         workload = extract_workload(match.group("trace"))
         m = extract_metrics(os.path.join(src, fname))
