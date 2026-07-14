@@ -286,6 +286,126 @@ def collect_noerr_way_sweep():
     return rows
 
 
+# ── Multicore sheet (4-core SPEC mixes, results/multicore/1_error_rate_sweep) ──
+# One row per (mix, scheme, cpu); mix-level metrics (weighted_speedup, sum_ipc,
+# retirement totals) are repeated on each of the mix's four rows for easy
+# pivoting. norm_ipc is against the same mix's noerr run, per cpu.
+MULTICORE_DIR = os.path.join(REPO_RESULTS, "..", "multicore", "1_error_rate_sweep")
+
+# CARE runs are still in flight; flip this to include care/care_scrub once done.
+MULTICORE_SCHEMES = ("noerr",
+                     "off_1e-6", "off_1e-7", "off_1e-8",
+                     "pin_1e-6", "pin_1e-7", "pin_1e-8")
+
+MULTICORE_MIXES = {
+    "M1": ["605.mcf_s", "649.fotonik3d_s", "602.gcc_s", "603.bwaves_s"],
+    "M2": ["605.mcf_s", "649.fotonik3d_s", "602.gcc_s", "620.omnetpp_s"],
+    "M3": ["605.mcf_s", "649.fotonik3d_s", "603.bwaves_s", "620.omnetpp_s"],
+    "M4": ["605.mcf_s", "602.gcc_s", "603.bwaves_s", "620.omnetpp_s"],
+    "C1": ["623.xalancbmk_s", "628.pop2_s", "654.roms_s", "621.wrf_s"],
+    "C2": ["623.xalancbmk_s", "628.pop2_s", "654.roms_s", "607.cactuBSSN_s"],
+    "C3": ["623.xalancbmk_s", "628.pop2_s", "621.wrf_s", "607.cactuBSSN_s"],
+    "C4": ["623.xalancbmk_s", "654.roms_s", "621.wrf_s", "607.cactuBSSN_s"],
+    "H1": ["605.mcf_s", "649.fotonik3d_s", "623.xalancbmk_s", "628.pop2_s"],
+    "H2": ["602.gcc_s", "620.omnetpp_s", "621.wrf_s", "654.roms_s"],
+}
+MULTICORE_MIX_ORDER = ["M1", "M2", "M3", "M4", "C1", "C2", "C3", "C4", "H1", "H2"]
+MULTICORE_NUM_CPUS = 4
+
+RE_MC_CPU_IPC = re.compile(
+    r"^CPU (?P<cpu>\d) cumulative IPC:\s+(?P<ipc>[\d.]+)\s+instructions:\s*(?P<instr>\d+)")
+RE_MC_COMPLETE = re.compile(r"^Simulation complete CPU (?P<cpu>\d)")
+RE_MC_PERCPU_ERR = re.compile(
+    r"\[ERROR\]\s+CPU (?P<cpu>\d): absorbed=(?P<absorbed>\d+) first=\d+ added=\d+ "
+    r"known=\d+ retired=(?P<retired>\d+) baseline_retired=(?P<bretired>\d+)")
+
+MULTICORE_HEADER = [
+    "mix", "scheme", "pin_mode", "error_rate", "cpu", "workload",
+    "ipc", "norm_ipc", "weighted_speedup", "sum_ipc",
+    "total_error_events", "pages_retired", "baseline_page_retirements",
+    "err_absorbed_cpu", "err_retired_cpu", "completed",
+]
+
+
+def parse_multicore_run(path):
+    """Last-match per-CPU IPC (ROI block), completion, and error stats."""
+    run = {"ipc": {}, "complete": set(), "absorbed": {}, "retired_cpu": {},
+           "total_errors": None, "pages_retired": None, "baseline_retired": None}
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                m = RE_MC_CPU_IPC.match(line)
+                if m:
+                    run["ipc"][int(m.group("cpu"))] = float(m.group("ipc"))
+                    continue
+                m = RE_MC_COMPLETE.match(line)
+                if m:
+                    run["complete"].add(int(m.group("cpu")))
+                    continue
+                m = RE_MC_PERCPU_ERR.search(line)
+                if m:
+                    c = int(m.group("cpu"))
+                    run["absorbed"][c] = int(m.group("absorbed"))
+                    run["retired_cpu"][c] = (int(m.group("retired"))
+                                             + int(m.group("bretired")))
+                    continue
+                for key, rx in (("total_errors", RE_TOTAL_ERRORS),
+                                ("pages_retired", RE_PAGES_RETIRED)):
+                    m2 = rx.search(line)
+                    if m2:
+                        run[key] = int(m2.group(1))
+                        break
+                else:
+                    m2 = RE_BASELINE_PAGE_RETIRED.search(line)
+                    if m2:
+                        run["baseline_retired"] = int(m2.group(1))
+    except OSError:
+        pass
+    return run
+
+
+def collect_multicore():
+    base = os.path.normpath(MULTICORE_DIR)
+    if not os.path.isdir(base):
+        return []
+    rows = []
+    for mix in MULTICORE_MIX_ORDER:
+        runs = {}
+        for scheme in MULTICORE_SCHEMES:
+            path = os.path.join(base, f"champsim_4core_8mb_{scheme}_{mix}.txt")
+            if os.path.isfile(path):
+                runs[scheme] = parse_multicore_run(path)
+        noerr = runs.get("noerr")
+        for scheme in MULTICORE_SCHEMES:
+            run = runs.get(scheme)
+            if run is None:
+                continue
+            rate = "" if scheme == "noerr" else scheme.split("_")[1]
+            pin_mode = ("none" if scheme == "noerr"
+                        else "off" if scheme.startswith("off") else "on")
+            completed = len(run["complete"]) == MULTICORE_NUM_CPUS
+            norms = []
+            for c in range(MULTICORE_NUM_CPUS):
+                ipc = run["ipc"].get(c)
+                base_ipc = noerr["ipc"].get(c) if noerr else None
+                norms.append(ipc / base_ipc if (ipc and base_ipc) else None)
+            full = all(n is not None for n in norms)
+            weighted = sum(norms) if full else None
+            sum_ipc = (sum(run["ipc"].values())
+                       if len(run["ipc"]) == MULTICORE_NUM_CPUS else None)
+            for c in range(MULTICORE_NUM_CPUS):
+                rows.append([
+                    mix, scheme, pin_mode, rate, c,
+                    MULTICORE_MIXES[mix][c],
+                    run["ipc"].get(c), norms[c], weighted, sum_ipc,
+                    run["total_errors"], run["pages_retired"],
+                    run["baseline_retired"],
+                    run["absorbed"].get(c), run["retired_cpu"].get(c),
+                    completed,
+                ])
+    return rows
+
+
 def write_sheet(wb, name, header, data_rows):
     ws = wb.create_sheet(title=name)
     ws.append(header)
@@ -308,6 +428,11 @@ def main():
     noerr_rows = collect_noerr_way_sweep()
     write_sheet(wb, "Way sweep in No error", NOERR_HEADER, noerr_rows)
     print(f"  Way sweep in No error: {len(noerr_rows)} rows")
+
+    multicore_rows = collect_multicore()
+    if multicore_rows:
+        write_sheet(wb, "Multicore", MULTICORE_HEADER, multicore_rows)
+        print(f"  Multicore:             {len(multicore_rows)} rows")
 
     wb.save(OUTPUT_XLSX)
     print(f"\nXLSX: {OUTPUT_XLSX}")
