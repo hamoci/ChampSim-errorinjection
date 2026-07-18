@@ -22,7 +22,9 @@ TEMPLATE = json.load(open(os.path.join(BASE_DIR, "pinning_on", "4core_8MBLLC_2MB
 
 THRESHOLDS = [2, 4, 8, 16, 32]
 MAX_WAYS = [1, 2, 4, 6, 8, 10, 12]
-RATES = {"1e-7": 1440000, "1e-8": 144000}
+# Exp6 sweeps all four rates (user decision 2026-07-17); Exp2 stays 1e-8-only
+# (exp1 measured ~zero retirements at 1e-7 and above).
+RATES = {"1e-5": 144000000, "1e-6": 14400000, "1e-7": 1440000, "1e-8": 144000}
 NOERR_WAYS = list(range(8, 16))  # w16 = exp1 noerr binary (validated identical)
 
 CLUSTERED = {"error_spatial_model": "clustered", "error_seed": 54321}

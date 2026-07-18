@@ -67,7 +67,7 @@ for thr in 2 4 8 16 32; do
   EXP2_BINS+=("champsim_4core_8mb_pin_thr${thr}_clu_1e-8" "champsim_4core_8mb_off_thr${thr}_clu_1e-8")
 done
 for w in 1 2 4 6 8 10 12; do
-  for rate in 1e-7 1e-8; do EXP6_BINS+=("champsim_4core_8mb_pin_mw${w}_clu_${rate}"); done
+  for rate in 1e-5 1e-6 1e-7 1e-8; do EXP6_BINS+=("champsim_4core_8mb_pin_mw${w}_clu_${rate}"); done
 done
 for w in 8 9 10 11 12 13 14 15; do EXP7_BINS+=("champsim_4core_8mb_noerr_w${w}"); done
 
