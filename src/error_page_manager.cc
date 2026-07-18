@@ -112,6 +112,12 @@ void ErrorPageManager::retire_page(uint64_t page_base, bool queue_llc_sweep) {
                        pending_retirement_pages.size());
         }
     }
+
+    // 4. Clustered fault model: permanent retirement + fault lifecycle.
+    //    UNIFORM keeps the legacy re-registration artifact (bit-identical).
+    if (spatial_model == ErrorSpatialModel::CLUSTERED) {
+        on_page_retired_clustered(page_base);
+    }
 }
 
 bool ErrorPageManager::record_baseline_error(uint64_t pa) {
@@ -138,23 +144,324 @@ bool ErrorPageManager::record_baseline_error(uint64_t pa) {
 }
 
 // ============================================================
+// Spatial fault model (CLUSTERED) — Poisson cluster injection
+// ============================================================
+//
+// Temporal layer: homogeneous Poisson process (exponential inter-arrival,
+// mean = error_cycle_interval CPU cycles) on a dedicated seeded RNG, so the
+// expected total error count matches the configured rate exactly.
+//
+// Spatial layer: every arrival is a manifestation of a persistent FaultDomain.
+// With probability fault_reuse_prob it re-manifests an existing fault
+// (concentration); otherwise a new fault is created with a mode sampled from
+// the cell/row/bank weights. A new fault is unanchored: the next serviced read
+// (any address) anchors it, inheriting that access's (bank, row, line) — this
+// keeps every error on data the workload actually touches. Re-manifestations
+// only consume on reads inside the fault's region (line / row / bank).
+//
+// Count preservation: a manifestation that no access matches within
+// error_starvation_cycles falls back to "any read" (starved), so the total
+// injected count still follows the Poisson budget; the fallback is counted.
+
+void ErrorPageManager::update_clustered_errors(uint64_t current_cycle) {
+    if (!injection_initialized) {
+        temporal_rng.seed(error_seed);
+        spatial_rng.seed(error_seed ^ 0x9E3779B97F4A7C15ULL);  // decorrelate streams
+        std::exponential_distribution<double> d(1.0 / static_cast<double>(error_cycle_interval));
+        next_error_cycle = current_cycle + std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(d(temporal_rng))));
+        injection_initialized = true;
+    }
+
+    // Catch up all arrivals scheduled at or before this cycle (true Poisson:
+    // several arrivals may share a slow-clock window).
+    std::exponential_distribution<double> d(1.0 / static_cast<double>(error_cycle_interval));
+    while (current_cycle >= next_error_cycle) {
+        spawn_manifest(next_error_cycle);
+        next_error_cycle += std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(d(temporal_rng))));
+    }
+
+    // Starvation aging: staged widening (exact -> fault's bank -> any read).
+    // The bank stage keeps a stalled manifestation inside its fault's bank,
+    // preserving spatial clustering; the any stage preserves the error count.
+    for (auto& ev : pending_manifests) {
+        uint64_t age = current_cycle - ev.fire_cycle;
+        uint8_t target = (age > 2 * error_starvation_cycles) ? 2 : (age > error_starvation_cycles) ? 1 : 0;
+        if (target > ev.widen) {
+            if (target >= 1 && ev.widen < 1) stat_widened_bank++;
+            if (target >= 2 && ev.widen < 2) stat_widened_any++;
+            ev.widen = target;
+            if (debug == 1) {
+                fmt::print("[FAULT] manifestation of fault {} starved (fired at cycle {}), widened to {}\n",
+                           ev.fault_idx, ev.fire_cycle, target == 1 ? "bank" : "any-read");
+            }
+        }
+    }
+}
+
+// Pick the fault a new manifestation belongs to: reuse a live fault with
+// probability fault_reuse_prob, otherwise create a new one. Dead faults
+// (killed by page retirement) are excluded from the reuse pool.
+size_t ErrorPageManager::select_fault_for_manifest() {
+    std::uniform_real_distribution<double> u(0.0, 1.0);
+
+    if (!live_fault_indices.empty() && u(spatial_rng) < fault_reuse_prob) {
+        std::uniform_int_distribution<size_t> pick(0, live_fault_indices.size() - 1);
+        return live_fault_indices[pick(spatial_rng)];
+    }
+
+    // New fault: sample mode from configured weights; every fault lives in
+    // one x8 device (byte lane), sampled uniformly (CARE chip counters).
+    double total = fault_weight_cell + fault_weight_row + fault_weight_bank;
+    double r = u(spatial_rng) * total;
+    FaultMode fault_mode = (r < fault_weight_cell)                     ? FaultMode::CELL
+                         : (r < fault_weight_cell + fault_weight_row)  ? FaultMode::ROW
+                                                                       : FaultMode::BANK;
+    FaultDomain f{fault_mode};
+    std::uniform_int_distribution<int> chip_pick(0, CareEccCache::NUM_GLOBAL_COUNTERS - 1);
+    f.chip = static_cast<uint8_t>(chip_pick(spatial_rng));
+    faults.push_back(f);
+    size_t fault_idx = faults.size() - 1;
+    live_fault_indices.push_back(fault_idx);
+    stat_faults_created[static_cast<size_t>(fault_mode)]++;
+    if (debug == 1) {
+        fmt::print("[FAULT] new fault {} mode={} chip={}\n", fault_idx,
+                   fault_mode == FaultMode::CELL ? "CELL" : fault_mode == FaultMode::ROW ? "ROW" : "BANK", f.chip);
+    }
+    return fault_idx;
+}
+
+void ErrorPageManager::spawn_manifest(uint64_t fire_cycle) {
+    pending_manifests.push_back(PendingManifest{select_fault_for_manifest(), fire_cycle});
+    stat_pending_peak = std::max(stat_pending_peak, pending_manifests.size());
+}
+
+// Page retirement under the clustered model: the page's data migrated to a
+// healthy frame, so (1) the PA never records errors again, and (2) CELL/ROW
+// faults anchored inside the page die — their future Poisson share is
+// resampled onto live faults (count preservation, user decision 2026-07-15).
+// BANK faults survive: bank circuitry is not fixed by migrating one page.
+void ErrorPageManager::on_page_retired_clustered(uint64_t page_base) {
+    clustered_retired_pages.insert(page_base);
+
+    bool killed_any = false;
+    for (auto it = live_fault_indices.begin(); it != live_fault_indices.end(); ) {
+        FaultDomain& f = faults[*it];
+        bool in_page = f.anchored && (f.anchor_cl & CareEccCache::PAGE_BASE_MASK) == page_base;
+        if (in_page && (f.mode == FaultMode::CELL || f.mode == FaultMode::ROW)) {
+            f.dead = true;
+            stat_faults_killed[static_cast<size_t>(f.mode)]++;
+            killed_any = true;
+            if (debug == 1) {
+                fmt::print("[FAULT] fault {} ({}) killed by retirement of page 0x{:x}\n",
+                           *it, f.mode == FaultMode::CELL ? "CELL" : "ROW", page_base);
+            }
+            it = live_fault_indices.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (killed_any) {
+        for (auto& ev : pending_manifests) {
+            if (faults[ev.fault_idx].dead) {
+                ev.fault_idx = select_fault_for_manifest();
+                stat_resampled_manifests++;
+            }
+        }
+    }
+}
+
+bool ErrorPageManager::consume_clustered_error(uint64_t cl_addr, uint64_t bank_key, uint64_t row) {
+    // Reads to a retired page address the migrated-to healthy frame:
+    // never consume (neither anchoring nor widened fallback) there.
+    if (clustered_retired_pages.count(cl_addr & CareEccCache::PAGE_BASE_MASK) > 0) {
+        return false;
+    }
+
+    for (auto it = pending_manifests.begin(); it != pending_manifests.end(); ++it) {
+        FaultDomain& f = faults[it->fault_idx];
+        bool anchored_now = false;
+        bool match = false;
+
+        if (!f.anchored) {
+            // First manifestation anchors the fault at this access
+            f.anchored = true;
+            f.bank_key = bank_key;
+            f.row = row;
+            f.anchor_cl = cl_addr;
+            anchored_now = true;
+            match = true;
+        } else {
+            switch (f.mode) {
+            case FaultMode::CELL: match = (cl_addr == f.anchor_cl); break;
+            case FaultMode::ROW:  match = (bank_key == f.bank_key && row == f.row); break;
+            case FaultMode::BANK: match = (bank_key == f.bank_key); break;
+            }
+            // Staged starvation widening: bank first, then anywhere
+            if (!match && it->widen >= 1) match = (bank_key == f.bank_key);
+            if (!match && it->widen >= 2) match = true;
+        }
+
+        if (match) {
+            f.manifest_count++;
+            stat_manifests[static_cast<size_t>(f.mode)]++;
+            if (anchored_now) stat_anchor_manifests++;
+            last_consumed_chip = f.chip;
+            record_error_location(cl_addr, bank_key, row);
+            if (debug == 1) {
+                fmt::print("[FAULT] manifest fault {} mode={} cl=0x{:x} bank_key=0x{:x} row={}{}{}\n",
+                           it->fault_idx,
+                           f.mode == FaultMode::CELL ? "CELL" : f.mode == FaultMode::ROW ? "ROW" : "BANK",
+                           cl_addr, bank_key, row,
+                           anchored_now ? " (anchor)" : "", it->widen > 0 ? " (widened)" : "");
+            }
+            pending_manifests.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+void ErrorPageManager::print_spatial_fault_stats() const {
+    if (spatial_model == ErrorSpatialModel::CLUSTERED) {
+        print_clustered_stats();
+    } else if (location_stats_enabled) {
+        // UNIFORM comparison data: opt-in only (legacy output stays identical)
+        fmt::print("[ERROR]\n");
+        fmt::print("[ERROR] [Error Location Distribution (uniform)]\n");
+        print_location_histograms();
+    }
+}
+
+// Fixed-size summary of where consumed errors landed: distinct counts,
+// avg/max per granularity, top-5 hot spots. Output size is independent of
+// the number of errors (full dumps would be thousands of lines).
+void ErrorPageManager::print_location_histograms() const {
+    uint64_t total = 0;
+    for (const auto& [k, v] : bank_manifest_hist) total += v;
+    if (total == 0) {
+        return;
+    }
+
+    auto max_count = [](const auto& hist) {
+        uint64_t m = 0;
+        for (const auto& [k, v] : hist) m = std::max(m, v);
+        return m;
+    };
+    double total_d = static_cast<double>(total);
+    fmt::print("[ERROR]   Distinct Lines / Rows / Banks:  {} / {} / {}\n",
+               line_manifest_hist.size(), row_manifest_hist.size(), bank_manifest_hist.size());
+    fmt::print("[ERROR]   Errors per Line (avg/max):      {:.2f} / {}\n",
+               total_d / static_cast<double>(line_manifest_hist.size()), max_count(line_manifest_hist));
+    fmt::print("[ERROR]   Errors per Row (avg/max):       {:.2f} / {}\n",
+               total_d / static_cast<double>(row_manifest_hist.size()), max_count(row_manifest_hist));
+    fmt::print("[ERROR]   Errors per Bank (avg/max):      {:.2f} / {}\n",
+               total_d / static_cast<double>(bank_manifest_hist.size()), max_count(bank_manifest_hist));
+
+    std::vector<std::pair<uint64_t, uint64_t>> lines(line_manifest_hist.begin(), line_manifest_hist.end());
+    std::sort(lines.begin(), lines.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    fmt::print("[ERROR]   Top Lines (cl:count):          ");
+    for (size_t i = 0; i < std::min<size_t>(5, lines.size()); i++) {
+        fmt::print(" 0x{:x}:{}", lines[i].first, lines[i].second);
+    }
+    fmt::print("\n");
+
+    std::vector<std::pair<std::pair<uint64_t, uint64_t>, uint64_t>> rows(row_manifest_hist.begin(), row_manifest_hist.end());
+    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    fmt::print("[ERROR]   Top Rows (ch/bank/row:count):  ");
+    for (size_t i = 0; i < std::min<size_t>(5, rows.size()); i++) {
+        fmt::print(" {}/{}/{}:{}", rows[i].first.first >> 32, rows[i].first.first & 0xFFFFFFFFULL,
+                   rows[i].first.second, rows[i].second);
+    }
+    fmt::print("\n");
+}
+
+void ErrorPageManager::print_clustered_stats() const {
+    uint64_t total_faults = stat_faults_created[0] + stat_faults_created[1] + stat_faults_created[2];
+    uint64_t total_manifests = stat_manifests[0] + stat_manifests[1] + stat_manifests[2];
+
+    fmt::print("[ERROR]\n");
+    fmt::print("[ERROR] [Spatial Fault Model (clustered)]\n");
+    fmt::print("[ERROR]   Seed:                           {}\n", error_seed);
+    fmt::print("[ERROR]   Faults Created:                 {} (cell={} row={} bank={})\n",
+               total_faults, stat_faults_created[0], stat_faults_created[1], stat_faults_created[2]);
+    fmt::print("[ERROR]   Faults Killed by Retirement:    {} (cell={} row={})\n",
+               stat_faults_killed[0] + stat_faults_killed[1], stat_faults_killed[0], stat_faults_killed[1]);
+    fmt::print("[ERROR]   Resampled Manifestations:       {}\n", stat_resampled_manifests);
+    fmt::print("[ERROR]   Retired Pages (permanent):      {}\n", clustered_retired_pages.size());
+    fmt::print("[ERROR]   Manifestations (injected CEs):  {} (cell={} row={} bank={})\n",
+               total_manifests, stat_manifests[0], stat_manifests[1], stat_manifests[2]);
+    fmt::print("[ERROR]     Anchoring (first of a fault): {}\n", stat_anchor_manifests);
+    fmt::print("[ERROR]     Starved -> Bank-Widened:      {}\n", stat_widened_bank);
+    fmt::print("[ERROR]     Starved -> Any-Widened:       {}\n", stat_widened_any);
+    fmt::print("[ERROR]   Pending at End / Peak:          {} / {}\n", pending_manifests.size(), stat_pending_peak);
+    if (total_faults > 0) {
+        uint64_t max_manifest = 0;
+        for (const auto& f : faults) max_manifest = std::max(max_manifest, f.manifest_count);
+        fmt::print("[ERROR]   Manifests per Fault (avg/max):  {:.1f} / {}\n",
+                   static_cast<double>(total_manifests) / static_cast<double>(total_faults), max_manifest);
+    }
+    if (!bank_manifest_hist.empty() && total_manifests > 0) {
+        std::vector<std::pair<uint64_t, uint64_t>> sorted(bank_manifest_hist.begin(), bank_manifest_hist.end());
+        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+        fmt::print("[ERROR]   Banks Touched:                  {}\n", sorted.size());
+        fmt::print("[ERROR]   Top Banks (ch/bank_idx: count):");
+        size_t top_n = std::min<size_t>(8, sorted.size());
+        for (size_t i = 0; i < top_n; i++) {
+            fmt::print(" {}/{}:{}", sorted[i].first >> 32, sorted[i].first & 0xFFFFFFFFULL, sorted[i].second);
+        }
+        fmt::print("\n");
+        fmt::print("[ERROR]   Top-1 Bank Share:               {:.1f}%\n",
+                   100.0 * static_cast<double>(sorted[0].second) / static_cast<double>(total_manifests));
+    }
+    print_location_histograms();
+}
+
+// ============================================================
 // CARE scheme (HPCA'21) — reactive-only, hard-error-only
 // ============================================================
 
 void ErrorPageManager::init_care_cache() {
     // Fail fast with a config-pointing message; the constructor's assert would
-    // vanish under -DNDEBUG and the set-index mask would silently alias.
+    // vanish under -DNDEBUG.
     if (care_ecc_sets == 0 || (care_ecc_sets & (care_ecc_sets - 1)) != 0 || care_ecc_ways == 0) {
         fmt::print("[ERROR_PAGE_MANAGER] FATAL: care_ecc_sets must be a nonzero power of two and care_ecc_ways nonzero (got {} x {})\n",
                    care_ecc_sets, care_ecc_ways);
         std::abort();
     }
+    if (care_row_groups == 0) {
+        fmt::print("[ERROR_PAGE_MANAGER] FATAL: CARE DRAM geometry not initialized (set_care_dram_geometry must run before init_care_cache)\n");
+        std::abort();
+    }
     care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways, care_proactive, care_proactive_or);
 }
 
-CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t cpu_idx) {
+void ErrorPageManager::set_care_dram_geometry(uint64_t channels, uint64_t banks_per_channel, uint64_t rows) {
+    care_banks_per_channel = banks_per_channel;
+    care_total_banks = channels * banks_per_channel;
+    if (care_total_banks == 0 || care_ecc_sets % care_total_banks != 0) {
+        fmt::print("[ERROR_PAGE_MANAGER] FATAL: care_ecc_sets ({}) must be a multiple of total DRAM banks ({} = {} ch x {}/ch) for the paper set index\n",
+                   care_ecc_sets, care_total_banks, channels, banks_per_channel);
+        std::abort();
+    }
+    care_row_groups = care_ecc_sets / care_total_banks;
+    uint64_t row_bits = 0;
+    while ((1ULL << row_bits) < rows) row_bits++;
+    uint64_t group_bits = 0;
+    while ((1ULL << group_bits) < care_row_groups) group_bits++;
+    if (group_bits > row_bits) {
+        fmt::print("[ERROR_PAGE_MANAGER] FATAL: row groups ({}) exceed row count ({})\n", care_row_groups, rows);
+        std::abort();
+    }
+    care_row_group_shift = row_bits - group_bits;
+    fmt::print("[ERROR_PAGE_MANAGER] CARE set index: {} banks x {} row-groups (row shift {}) = {} sets (paper III.B.3 layout)\n",
+               care_total_banks, care_row_groups, care_row_group_shift, care_ecc_sets);
+}
+
+CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row) {
     uint64_t cl_addr = get_cache_line_addr(pa);
-    auto out = care_cache->on_read(cl_addr);
+    size_t set = care_set_index(bank_key, row);
+    auto out = care_cache->on_read(cl_addr, set);
 
     if (debug == 1 && out.promoted_s3) {
         fmt::print("[CARE] S2->S3 addr=0x{:x} (hard error confirmed)\n", cl_addr);
@@ -164,20 +471,20 @@ CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t c
         uint64_t page_base = get_page_base_pa(pa);
 
         // Proactive victim list must be collected before any invalidation:
-        // the triggering entry (and its set neighbors) are still resident here.
+        // the triggering page is still in the observed list here.
         std::vector<uint64_t> proactive_victims;
         if (out.proactive) {
-            proactive_victims = care_cache->set_resident_pages(cl_addr);
+            proactive_victims = care_cache->region_error_pages(set);
         }
 
         size_t invalidated = care_cache->invalidate_page(page_base);
         retire_page(page_base, /*queue_llc_sweep=*/false);  // coverage move + counter erase; no sweep consumer under CARE
         stat_care_retirement_count++;
         per_cpu_error_stats[cpu_idx].care_retirements++;
-        if (debug == 1) {
-            fmt::print("[CARE] RETIRE page=0x{:x} trigger_addr=0x{:x} ecc_entries_invalidated={}\n",
-                       page_base, cl_addr, invalidated);
-        }
+        // Always-on event log (plan P3b): reactive retirements are rare
+        // (tens per run) so this is grep-friendly signal, not noise.
+        fmt::print("[CARE][RETIRE] page=0x{:x} trigger_cl=0x{:x} set={} chip={} err_count={} cpu={} ecc_invalidated={}\n",
+                   page_base, cl_addr, set, out.entry_chip, out.entry_err_count, cpu_idx, invalidated);
 
         if (out.proactive) {
             // Paper III.C: retire everything the set protects. The triggering
@@ -185,32 +492,36 @@ CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t c
             // interrupt (cost under-counted; trigger count is the metric here).
             for (uint64_t victim : proactive_victims) {
                 if (victim == page_base) continue;
+                if (clustered_retired_pages.count(victim) > 0) continue;  // already permanently retired
                 size_t v_inv = care_cache->invalidate_page(victim);
                 retire_page(victim, /*queue_llc_sweep=*/false);
                 stat_care_proactive_page_count++;
                 if (debug == 1) {
-                    fmt::print("[CARE] PROACTIVE RETIRE page=0x{:x} (set of 0x{:x}) ecc_entries_invalidated={}\n",
-                               victim, cl_addr, v_inv);
+                    fmt::print("[CARE] PROACTIVE RETIRE page=0x{:x} (set {}) ecc_entries_invalidated={}\n",
+                               victim, set, v_inv);
                 }
             }
-            if (debug == 1) {
-                fmt::print("[CARE] PROACTIVE TRIGGER trigger_addr=0x{:x} batch_pages={}\n",
-                           cl_addr, proactive_victims.size());
+            // Always-on event log (plan P3b): region = (bank, row-group)
+            fmt::print("[CARE][PROACTIVE] set={} biased_chip={} bias={} bank_key=0x{:x} row_group={} victims={} pages=[",
+                       set, out.biased_chip, out.bias, bank_key, row >> care_row_group_shift, proactive_victims.size());
+            for (size_t i = 0; i < proactive_victims.size(); i++) {
+                fmt::print("{}0x{:x}", i ? " " : "", proactive_victims[i]);
             }
+            fmt::print("]\n");
         }
     }
     return out;
 }
 
-void ErrorPageManager::care_on_write(uint64_t pa) {
+void ErrorPageManager::care_on_write(uint64_t pa, uint64_t bank_key, uint64_t row) {
     uint64_t cl_addr = get_cache_line_addr(pa);
-    bool confirmed = care_cache->on_write(cl_addr);
+    bool confirmed = care_cache->on_write(cl_addr, care_set_index(bank_key, row));
     if (debug == 1 && confirmed) {
         fmt::print("[CARE] S1->S2 addr=0x{:x} (write confirmation)\n", cl_addr);
     }
 }
 
-void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint8_t bank_idx) {
+void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row) {
     uint64_t cl_addr = get_cache_line_addr(pa);
 
     // Ground-truth faulty-line set for the Protection Coverage metric (D8).
@@ -223,14 +534,15 @@ void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uin
     auto& s = per_cpu_error_stats[cpu_idx];
     s.errors_absorbed++;
 
-    switch (care_cache->on_error(cl_addr, bank_idx)) {
+    size_t set = care_set_index(bank_key, row);
+    switch (care_cache->on_error(cl_addr, set, last_consumed_chip)) {
     case CareEccCache::RegisterOutcome::REGISTERED:
         s.care_registered++;
-        if (debug == 1) fmt::print("[CARE] REG addr=0x{:x} (S1)\n", cl_addr);
+        if (debug == 1) fmt::print("[CARE] REG addr=0x{:x} set={} chip={} (S1)\n", cl_addr, set, last_consumed_chip);
         if (care_demand_scrub) {
             // MC demand scrub: corrective write follows the CE-detecting read,
             // confirming S1->S2 without waiting for an application writeback.
-            care_cache->on_write(cl_addr);
+            care_cache->on_write(cl_addr, set);
             if (debug == 1) fmt::print("[CARE] SCRUB addr=0x{:x} (S1->S2)\n", cl_addr);
         }
         break;
@@ -334,6 +646,8 @@ void ErrorPageManager::print_error_stats() const {
         fmt::print("[ERROR]   Avg Lines per Retirement:       {:.1f}\n",
                    static_cast<double>(stat_retirement_invalidated_lines) / static_cast<double>(stat_retirement_count));
     }
+
+    print_spatial_fault_stats();
 
     print_per_cpu_error_stats();
 

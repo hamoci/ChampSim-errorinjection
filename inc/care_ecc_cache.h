@@ -1,5 +1,5 @@
 /*
- * CARE (HPCA'21) ECC cache model — reactive-only, hard-error-only simplification.
+ * CARE (HPCA'21) ECC cache model — reactive + proactive, hard-error-only.
  *
  * Models the memory-controller-resident "ECC cache" of CARE (Chen et al.,
  * "CARE: Coordinated Augmentation for Elastic Resilience on DRAM Errors in
@@ -15,28 +15,34 @@
  *     (new block err_count == 1) and resident err_count >= 1, it degenerates
  *     to "insert only into a free way" — fixed by unit test.
  *
- * Proactive retirement (paper Section III.C) is modeled when enabled:
- *   - 8 saturating 4-bit global counters per set. On each reactive retirement
- *     the retiring entry's error count (capped at 3 = the paper's 2-bit local
- *     counter maximum) accumulates into the counter picked by the entry's
- *     bank index (DRAM bank id folded mod 8 — adaptation: the paper indexes
- *     sets by channel/rank/bank so its per-set counters split by byte lane;
- *     with our plain-address set index the bank fold preserves the same
- *     function, detecting spatially-correlated hard-fault confirmations).
+ * Set indexing (paper III.B.3): the index is NOT derived from the line
+ * address here. The caller (ErrorPageManager) composes it from DRAM
+ * coordinates — channel | rank/bankgroup/bank | row MSBs — so one set
+ * covers one (bank, row-region), exactly the paper's 10-bit layout
+ * (6 bank-field bits + 4 partial-row bits with our 64-bank geometry).
+ * Every lookup therefore takes an explicit set argument.
+ *
+ * Proactive retirement (paper Section III.C):
+ *   - 8 saturating 4-bit global counters per set, one per x8 DEVICE (byte
+ *     lane 0B..7B of the 64B block, paper Fig. 1/2b). The injected fault
+ *     model assigns each fault a chip (0-7); a retiring entry accumulates
+ *     its error count (capped at 3 = the paper's 2-bit local counter max)
+ *     into the counter of its chip.
  *   - Trigger check at accumulation: some counter saturated (== 15) AND
  *     max - min >= 12 (paper's 95%-confidence bias bound) -> proactive:
- *     caller retires every page resident in the set. Saturation without
- *     bias resets the set's counters for the next accounting round.
- *   - Under uniform cell-fault injection this provably never fires (by the
- *     paper's own design); peak-value/bias stats record the measured margin.
+ *     caller retires every page resident in the set (adaptation: the paper
+ *     retires the set's whole region — all pages of one (bank, row-region);
+ *     with 2MB pages interleaved across banks that region overlaps nearly
+ *     every page, so we retire the pages the set actually tracks and keep
+ *     the trigger count as the headline metric). Saturation without bias
+ *     resets the set's counters for the next accounting round.
  *
- * Deliberate deviations (paper text records these; see EXPANSION_PLAN B-0):
- *   - Set index is a plain address-bit slice, not channel/rank/bank/partial-row
- *     (see bank-fold adaptation above for the proactive counters).
+ * Remaining deliberate deviations:
  *   - Single per-entry error counter instead of 8x2-bit column counters
  *     (per-retirement global-counter contribution capped at 3 to compensate).
  *   - Random tie-break of Pseudocode 1 replaced by lowest-index pick for
  *     determinism (branch unreachable under the degenerate replacement above).
+ *   - Transient errors unmodeled (hard-only): no S2 -> S0 soft-repair path.
  *
  * Pure logic: no ChampSim dependencies, unit-testable standalone.
  */
@@ -47,6 +53,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 class CareEccCache
@@ -60,6 +67,10 @@ public:
     bool retire{false};       // read in S3: caller must retire the page
     bool proactive{false};    // retirement saturated a biased global counter:
                               // caller must also retire set_resident_pages()
+    uint8_t entry_chip{0};    // retiring entry's chip (retirement log)
+    uint32_t entry_err_count{0}; // retiring entry's error count (retirement log)
+    uint8_t biased_chip{0};   // proactive only: the dominant counter's chip
+    uint8_t bias{0};          // proactive only: max - min at the trigger
   };
 
   enum class RegisterOutcome : uint8_t {
@@ -96,26 +107,33 @@ public:
                bool or_trigger = false);
 
   // Every DRAM read of this 64B-aligned line (first service only).
-  ReadOutcome on_read(uint64_t line_addr);
+  // set = caller-composed paper index (channel|rank/bank fold|row MSBs).
+  ReadOutcome on_read(uint64_t line_addr, std::size_t set);
 
   // Every DRAM write of this line: S1 -> S2 confirmation step.
   // Returns true if the S1->S2 transition happened.
-  bool on_write(uint64_t line_addr);
+  bool on_write(uint64_t line_addr, std::size_t set);
 
-  // Injected error on this line: register (S1) if untracked. bank_idx picks
-  // the proactive global counter this line accounts to (DRAM bank id mod 8).
-  RegisterOutcome on_error(uint64_t line_addr, uint8_t bank_idx = 0);
+  // Injected error on this line: register (S1) if untracked. chip picks the
+  // proactive global counter (x8 device / byte lane the fault lives in).
+  RegisterOutcome on_error(uint64_t line_addr, std::size_t set, uint8_t chip = 0);
 
-  // Page retirement: drop every entry inside the 2MB page. Returns count.
+  // Page retirement: drop every entry inside the 2MB page (and forget the
+  // page in every set's observed-error list). Returns entry count.
   std::size_t invalidate_page(uint64_t page_base);
 
-  // Distinct page bases of all valid entries in line_addr's set — the victim
-  // list of a proactive trigger ("all pages the set protects", adapted).
-  std::vector<uint64_t> set_resident_pages(uint64_t line_addr) const;
+  // Proactive victim list: every page that has EVER shown an injected error
+  // in this set's region (registered, already-tracked or dropped) and is not
+  // yet retired. Rigorous adaptation of the paper's "all pages the set
+  // protects": with 2MB pages fine-interleaved across banks, the literal
+  // region (one bank x one row-group) intersects a thin slice of nearly
+  // every page, so region-wide retirement is ill-defined here — we retire
+  // the pages the region has evidence against instead.
+  std::vector<uint64_t> region_error_pages(std::size_t set) const;
 
   // Introspection (stats printing / unit tests)
-  bool is_tracked(uint64_t line_addr) const;
-  State state_of(uint64_t line_addr) const; // precondition: is_tracked()
+  bool is_tracked(uint64_t line_addr, std::size_t set) const;
+  State state_of(uint64_t line_addr, std::size_t set) const; // precondition: is_tracked()
   std::size_t occupancy() const;
   std::size_t num_sets() const { return sets_; }
   std::size_t num_ways() const { return ways_; }
@@ -131,19 +149,18 @@ private:
     uint32_t err_count{0}; // saturating
     State state{State::S1};
     bool valid{false};
-    uint8_t bank_idx{0};   // proactive global-counter index (bank id mod 8)
+    uint8_t chip_idx{0};   // proactive global-counter index (x8 device 0-7)
   };
 
-  std::size_t set_index(uint64_t line_addr) const { return (line_addr >> 6) & (sets_ - 1); }
-  Entry* find(uint64_t line_addr);
-  const Entry* find(uint64_t line_addr) const;
+  Entry* find(uint64_t line_addr, std::size_t set);
+  const Entry* find(uint64_t line_addr, std::size_t set) const;
   Entry* pick_victim(std::size_t set); // paper Pseudocode 1; nullptr = no replacement
 
   static constexpr uint32_t ERR_COUNT_CAP = 255;
 
-  // Accumulate the retiring entry into its set's global counters; returns
-  // whether the saturated-and-biased proactive condition fired.
-  bool account_retirement(std::size_t set, const Entry& e);
+  // Accumulate the retiring entry into its set's global counters; fills the
+  // outcome's proactive/biased_chip/bias fields when the trigger fires.
+  void account_retirement(std::size_t set, const Entry& e, ReadOutcome& out);
 
   std::size_t sets_;
   std::size_t ways_;
@@ -151,6 +168,9 @@ private:
   bool or_trigger_;
   std::vector<Entry> entries_; // sets_ x ways_, row-major
   std::vector<std::array<uint8_t, NUM_GLOBAL_COUNTERS>> gcounters_; // per set
+  // Pages with observed errors per set (proactive victim evidence). Bounded
+  // by the number of distinct erroneous pages; pages leave on retirement.
+  std::vector<std::unordered_set<uint64_t>> observed_pages_;
   Stats stats_{};
 };
 

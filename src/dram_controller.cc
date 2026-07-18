@@ -386,6 +386,11 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       auto error_latency = champsim::chrono::clock::duration{};
       auto& epm = ErrorPageManager::get_instance();
       uint64_t raw_pa = pkt->value().address.to<uint64_t>();
+      // DRAM coordinates for the clustered fault model and the CARE paper
+      // set index. bank_key uniquely identifies a bank across channels;
+      // op_idx already folds rank/bankgroup/bank within this channel.
+      const uint64_t err_bank_key =
+          (static_cast<uint64_t>(address_mapping.get_channel(pkt->value().address)) << 32) | static_cast<uint64_t>(op_idx);
 
       // CARE per-access hook — must run BEFORE the injection branch so the read that
       // registers a block pays no decode latency (BCH encoding is background, Fig.5).
@@ -400,9 +405,9 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
           error_latency = pkt->value().care_latency;
         } else {
           if (pkt->value().type == access_type::WRITE) {
-            epm.care_on_write(raw_pa);
+            epm.care_on_write(raw_pa, err_bank_key, op_row);
           } else {
-            auto care_read = epm.care_on_read(raw_pa, pkt->value().cpu);
+            auto care_read = epm.care_on_read(raw_pa, pkt->value().cpu, err_bank_key, op_row);
             care_retired_now = care_read.retire;
             if (care_read.retire) {
               // Page-offline cost, same rule as the baseline retirement branch below
@@ -434,16 +439,15 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
           // the WRITE skip above) so a just-retired line is not revived in the
           // same service. The pinning/baseline branch below keeps the pre-existing
           // re-service consumption artifact untouched (bit-identical constraint).
-          if (care_first_service && !care_retired_now && epm.consume_cycle_error()) {
+          if (care_first_service && !care_retired_now && epm.consume_cycle_error(raw_pa, err_bank_key, op_row)) {
             // SEC-DED corrects the block inline and registration/encoding is
             // background work — the consuming read itself pays nothing (plan D2).
-            // op_idx (rank/bankgroup/bank) folded mod 8 feeds the proactive
-            // per-set global counters (bank-fold adaptation, care_ecc_cache.h).
-            epm.care_on_injected_error(raw_pa, pkt->value().cpu,
-                                       static_cast<uint8_t>(op_idx % CareEccCache::NUM_GLOBAL_COUNTERS));
+            // The chip (byte lane) comes from the consumed fault via the EPM
+            // handoff; coordinates feed the paper set index.
+            epm.care_on_injected_error(raw_pa, pkt->value().cpu, err_bank_key, op_row);
             epm.record_error_access();
           }
-        } else if (ErrorPageManager::get_instance().consume_cycle_error()) {
+        } else if (ErrorPageManager::get_instance().consume_cycle_error(raw_pa, err_bank_key, op_row)) {
           if (epm.is_cache_pinning_enabled()) {
           // LLC Pinning ON: Dual-Layer Recording (PERT) + dynamic/fixed latency per case
           ErrorRecordResult result = epm.record_error(raw_pa);
@@ -577,6 +581,11 @@ void MEMORY_CONTROLLER::initialize()
     if (epm.get_mode() != ErrorPageManagerMode::CYCLE) {
       fmt::print("[ERROR_PAGE_MANAGER] WARNING: CARE enabled but error mode is not CYCLE — no injection, CARE stays inert\n");
     }
+    // Paper set index (III.B.3): channel | rank/bankgroup/bank | row MSBs.
+    // banks_per_channel must match DRAM_CHANNEL::bank_request_index's fold.
+    epm.set_care_dram_geometry(std::size(channels),
+                               address_mapping.ranks() * address_mapping.bankgroups() * address_mapping.banks(),
+                               address_mapping.rows());
     epm.init_care_cache();
     fmt::print("[ERROR_PAGE_MANAGER] CARE scheme: ON (ECC cache {} sets x {} ways, BCH decode {} cycles)\n",
                epm.get_care_ecc_sets(), epm.get_care_ecc_ways(), epm.get_care_bch_decode_cycles());

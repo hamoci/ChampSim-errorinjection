@@ -2,18 +2,18 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iterator>
 
 CareEccCache::CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled, bool or_trigger)
     : sets_(num_sets), ways_(num_ways), proactive_enabled_(proactive_enabled), or_trigger_(or_trigger), entries_(num_sets * num_ways),
-      gcounters_(num_sets)
+      gcounters_(num_sets), observed_pages_(num_sets)
 {
-  assert(sets_ > 0 && (sets_ & (sets_ - 1)) == 0); // power of two (set_index masking)
+  assert(sets_ > 0 && (sets_ & (sets_ - 1)) == 0); // power of two (paper 10-bit index layout)
   assert(ways_ > 0);
 }
 
-CareEccCache::Entry* CareEccCache::find(uint64_t line_addr)
+CareEccCache::Entry* CareEccCache::find(uint64_t line_addr, std::size_t set)
 {
-  auto set = set_index(line_addr);
   for (std::size_t w = 0; w < ways_; ++w) {
     auto& e = entries_[set * ways_ + w];
     if (e.valid && e.line_addr == line_addr)
@@ -22,12 +22,15 @@ CareEccCache::Entry* CareEccCache::find(uint64_t line_addr)
   return nullptr;
 }
 
-const CareEccCache::Entry* CareEccCache::find(uint64_t line_addr) const { return const_cast<CareEccCache*>(this)->find(line_addr); }
+const CareEccCache::Entry* CareEccCache::find(uint64_t line_addr, std::size_t set) const
+{
+  return const_cast<CareEccCache*>(this)->find(line_addr, set);
+}
 
-CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr)
+CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr, std::size_t set)
 {
   ReadOutcome out{};
-  Entry* e = find(line_addr);
+  Entry* e = find(line_addr, set);
   if (e == nullptr)
     return out;
 
@@ -46,9 +49,11 @@ CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr)
     break;
   case State::S3:
     out.retire = true; // caller retires the page, then invalidate_page() drops this entry
+    out.entry_chip = e->chip_idx;
+    out.entry_err_count = e->err_count;
     stats_.retires++;
     if (proactive_enabled_)
-      out.proactive = account_retirement(set_index(line_addr), *e);
+      account_retirement(set, *e, out);
     break;
   }
   return out;
@@ -59,11 +64,11 @@ CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr)
 // saturates, a max-min bias >= 12 means the confirmed hard errors concentrate
 // on one bank/chip -> proactive retirement of everything the set protects.
 // Saturation without bias closes the accounting round (counters reset).
-bool CareEccCache::account_retirement(std::size_t set, const Entry& e)
+void CareEccCache::account_retirement(std::size_t set, const Entry& e, ReadOutcome& out)
 {
   auto& gc = gcounters_[set];
   uint32_t contrib = std::min(e.err_count, LOCAL_CONTRIB_CAP);
-  gc[e.bank_idx] = static_cast<uint8_t>(std::min<uint32_t>(GLOBAL_COUNTER_MAX, gc[e.bank_idx] + contrib));
+  gc[e.chip_idx] = static_cast<uint8_t>(std::min<uint32_t>(GLOBAL_COUNTER_MAX, gc[e.chip_idx] + contrib));
   stats_.gc_accumulations++;
 
   auto [min_it, max_it] = std::minmax_element(gc.begin(), gc.end());
@@ -79,33 +84,30 @@ bool CareEccCache::account_retirement(std::size_t set, const Entry& e)
   bool triggered = or_trigger_ ? (saturated || biased) : (saturated && biased);
 
   if (!triggered && !saturated)
-    return false; // round still accumulating
+    return; // round still accumulating
 
-  if (triggered)
+  if (triggered) {
     stats_.proactive_triggers++;
+    out.proactive = true;
+    out.biased_chip = static_cast<uint8_t>(std::distance(gc.begin(), max_it));
+    out.bias = bias;
+  }
   gc.fill(0); // trigger, or saturation without bias: close the accounting round
   stats_.gc_resets++;
-  return triggered;
 }
 
-std::vector<uint64_t> CareEccCache::set_resident_pages(uint64_t line_addr) const
+std::vector<uint64_t> CareEccCache::region_error_pages(std::size_t set) const
 {
-  std::vector<uint64_t> pages;
-  auto set = set_index(line_addr);
-  for (std::size_t w = 0; w < ways_; ++w) {
-    const auto& e = entries_[set * ways_ + w];
-    if (!e.valid)
-      continue;
-    uint64_t page = e.line_addr & PAGE_BASE_MASK;
-    if (std::find(pages.begin(), pages.end(), page) == pages.end())
-      pages.push_back(page);
-  }
+  // Registered blocks always insert into observed_pages_ first, so the
+  // observed list is a superset of the resident entries' pages.
+  std::vector<uint64_t> pages(observed_pages_[set].begin(), observed_pages_[set].end());
+  std::sort(pages.begin(), pages.end()); // deterministic retirement order
   return pages;
 }
 
-bool CareEccCache::on_write(uint64_t line_addr)
+bool CareEccCache::on_write(uint64_t line_addr, std::size_t set)
 {
-  Entry* e = find(line_addr);
+  Entry* e = find(line_addr, set);
   if (e == nullptr || e->state != State::S1)
     return false;
 
@@ -163,14 +165,17 @@ CareEccCache::Entry* CareEccCache::pick_victim(std::size_t set)
   return only_min; // lowest-index deterministic tie-break
 }
 
-CareEccCache::RegisterOutcome CareEccCache::on_error(uint64_t line_addr, uint8_t bank_idx)
+CareEccCache::RegisterOutcome CareEccCache::on_error(uint64_t line_addr, std::size_t set, uint8_t chip)
 {
-  if (Entry* e = find(line_addr); e != nullptr) {
+  // Evidence for the proactive victim list: any observed error in this
+  // region marks the page, whether or not the block wins an ECC entry.
+  observed_pages_[set].insert(line_addr & PAGE_BASE_MASK);
+
+  if (Entry* e = find(line_addr, set); e != nullptr) {
     stats_.errors_on_tracked++; // already faulty: no state/count change (D3)
     return RegisterOutcome::ALREADY_TRACKED;
   }
 
-  auto set = set_index(line_addr);
   Entry* slot = nullptr;
   for (std::size_t w = 0; w < ways_; ++w) {
     auto& e = entries_[set * ways_ + w];
@@ -187,13 +192,16 @@ CareEccCache::RegisterOutcome CareEccCache::on_error(uint64_t line_addr, uint8_t
     return RegisterOutcome::DROPPED;
   }
 
-  *slot = Entry{line_addr, 1, State::S1, true, static_cast<uint8_t>(bank_idx % NUM_GLOBAL_COUNTERS)};
+  *slot = Entry{line_addr, 1, State::S1, true, static_cast<uint8_t>(chip % NUM_GLOBAL_COUNTERS)};
   stats_.registered++;
   return RegisterOutcome::REGISTERED;
 }
 
 std::size_t CareEccCache::invalidate_page(uint64_t page_base)
 {
+  for (auto& op : observed_pages_) {
+    op.erase(page_base);
+  }
   std::size_t removed = 0;
   for (auto& e : entries_) {
     if (e.valid && (e.line_addr & PAGE_BASE_MASK) == page_base) {
@@ -205,11 +213,11 @@ std::size_t CareEccCache::invalidate_page(uint64_t page_base)
   return removed;
 }
 
-bool CareEccCache::is_tracked(uint64_t line_addr) const { return find(line_addr) != nullptr; }
+bool CareEccCache::is_tracked(uint64_t line_addr, std::size_t set) const { return find(line_addr, set) != nullptr; }
 
-CareEccCache::State CareEccCache::state_of(uint64_t line_addr) const
+CareEccCache::State CareEccCache::state_of(uint64_t line_addr, std::size_t set) const
 {
-  const Entry* e = find(line_addr);
+  const Entry* e = find(line_addr, set);
   assert(e != nullptr);
   return e->state;
 }

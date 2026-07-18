@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <map>
+#include <utility>
 #include <array>
 #include <vector>
 #include <random>
@@ -32,6 +33,26 @@ enum class ErrorPageManagerMode {
     RANDOM,
     CYCLE,
     OFF,
+};
+
+// Spatial placement of CYCLE-mode injected errors.
+//   UNIFORM   — legacy: an error attaches to whatever read packet is serviced
+//               next, so locations mirror the (bank-interleaved) access stream.
+//   CLUSTERED — Poisson cluster model: error events belong to persistent
+//               FaultDomains (cell/row/bank) so repeated errors concentrate
+//               in the same line/row/bank, as hard faults do in the field.
+enum class ErrorSpatialModel {
+    UNIFORM,
+    CLUSTERED,
+};
+
+// DRAM fault granularity, following field-study fault taxonomies
+// (Sridharan & Liberty, SC'12): a fault is a persistent defect region;
+// every manifestation is one injected CE inside that region.
+enum class FaultMode {
+    CELL,   // single cell  -> repeats on one cache line
+    ROW,    // wordline     -> repeats across lines of one (bank, row)
+    BANK,   // bank circuitry -> repeats anywhere in one bank
 };
 
 // record_error() return values
@@ -127,6 +148,74 @@ private:
     uint64_t pending_error_count{0};  // Counter for pending errors
     int debug{1};  // Debug flag: 1 to enable debug logs, 0 to disable
 
+// Spatial fault model (CLUSTERED). All state below is unused in UNIFORM mode,
+// so legacy configs keep the exact same RNG stream and behavior.
+private:
+    // A persistent fault region. Created unanchored; the first read that
+    // consumes one of its manifestations fixes its coordinates.
+    struct FaultDomain {
+        FaultMode mode;
+        bool anchored{false};
+        bool dead{false};        // killed by page retirement (CELL/ROW only)
+        uint8_t chip{0};         // x8 device (byte lane 0-7) the defect lives in
+        uint64_t bank_key{0};    // (dram channel << 32) | bank_request_index
+        uint64_t row{0};         // DRAM row within the bank (ROW mode match)
+        uint64_t anchor_cl{0};   // cache-line address (CELL mode match)
+        uint64_t manifest_count{0};
+    };
+    // One Poisson arrival waiting to be consumed by a matching read.
+    // Starvation widens the match region in stages so a stalled manifestation
+    // first stays inside its fault's bank (clustering preserved) and only then
+    // falls back to any read (count preservation):
+    //   widen 0: exact fault region   (after error_starvation_cycles) ->
+    //   widen 1: fault's bank         (after 2x error_starvation_cycles) ->
+    //   widen 2: any read
+    struct PendingManifest {
+        size_t fault_idx;
+        uint64_t fire_cycle;
+        uint8_t widen{0};
+    };
+    ErrorSpatialModel spatial_model{ErrorSpatialModel::UNIFORM};
+    uint64_t error_seed{54321};
+    // Mode mix only (normalized by sum): CARE Table II permanent-fault FIT
+    // (Sridharan field study) — single-bit 18.6 / single-row 8.2 / single-bank
+    // 10.0. The absolute FIT rate is NOT used: the temporal rate stays on the
+    // accelerated error_cycle_interval scale (1e-5..1e-8 sweeps).
+    double fault_weight_cell{18.6};
+    double fault_weight_row{8.2};
+    double fault_weight_bank{10.0};
+    double fault_reuse_prob{0.7};
+    uint64_t error_starvation_cycles{1000000};
+    std::mt19937_64 temporal_rng{54321};  // inter-arrival sampling (CLUSTERED)
+    std::mt19937_64 spatial_rng{54321};   // fault creation/reuse sampling
+    bool injection_initialized{false};
+    uint64_t next_error_cycle{0};
+    std::vector<FaultDomain> faults;
+    std::vector<size_t> live_fault_indices;       // reuse-sampling pool (dead excluded)
+    std::vector<PendingManifest> pending_manifests;
+    // Pages permanently retired (hard-fault semantics): errors are never
+    // recorded against a retired page again — its PA now stands for the
+    // migrated-to healthy frame. CLUSTERED only; uniform keeps legacy behavior.
+    std::unordered_set<uint64_t> clustered_retired_pages;
+    // Clustered-mode statistics
+    uint64_t stat_faults_created[3]{0, 0, 0};   // indexed by FaultMode
+    uint64_t stat_manifests[3]{0, 0, 0};        // indexed by FaultMode
+    uint64_t stat_anchor_manifests{0};          // manifestations that anchored a fault
+    uint64_t stat_widened_bank{0};              // starvation: widened to fault's bank
+    uint64_t stat_widened_any{0};               // starvation: widened to any read
+    uint64_t stat_faults_killed[3]{0, 0, 0};    // faults dead via page retirement
+    uint64_t stat_resampled_manifests{0};       // pending events reassigned off dead faults
+    size_t stat_pending_peak{0};
+    // Error location histograms (bank / row / line granularity). Filled on
+    // every consumed error in BOTH spatial models (negligible cost: one map
+    // increment per rare error event); printed as a fixed-size summary —
+    // always under CLUSTERED, only with error_location_stats under UNIFORM
+    // (keeping legacy output byte-identical by default).
+    std::map<uint64_t, uint64_t> bank_manifest_hist;                        // bank_key -> errors
+    std::map<std::pair<uint64_t, uint64_t>, uint64_t> row_manifest_hist;    // (bank_key, row) -> errors
+    std::map<uint64_t, uint64_t> line_manifest_hist;                        // cl_addr -> errors
+    bool location_stats_enabled{false};
+
 // Cache Pinning (Error Way Partitioning)
 private:
     bool cache_pinning_enabled{false};  // Enable/disable cache pinning feature
@@ -151,14 +240,25 @@ private:
     // cell-fault injection the trigger provably never fires (see care_ecc_cache.h);
     // peak-margin stats are printed as the measured evidence.
     bool care_proactive{false};
-    // Exploratory: relax the proactive trigger to saturation OR bias
-    // (paper condition is AND). Off by default; see care_ecc_cache.h.
-    bool care_proactive_or{false};
+    // Proactive trigger condition. true (default, user decision 2026-07-16):
+    // saturation OR bias — fires when one counter reaches 15 or max-min >= 12.
+    // false: the paper's literal AND condition, which needs ~5 same-chip
+    // retirements landing in one set and never fired in full-scale probes.
+    bool care_proactive_or{true};
     uint32_t care_bch_decode_cycles{30};  // for stat printing; latency below is authoritative
     champsim::chrono::clock::duration care_bch_decode_latency{};
     size_t care_ecc_sets{1024};
     size_t care_ecc_ways{2};
     std::unique_ptr<CareEccCache> care_cache;
+    // Paper set-index geometry (III.B.3): set = global_bank_id * row_groups + row_group.
+    // Configured from MEMORY_CONTROLLER::initialize; zero row_groups = not initialized.
+    uint64_t care_banks_per_channel{0};   // ranks * bankgroups * banks
+    uint64_t care_total_banks{0};         // channels * banks_per_channel
+    uint64_t care_row_groups{0};          // care_ecc_sets / total_banks
+    uint64_t care_row_group_shift{0};     // row_bits - log2(row_groups)
+    // Chip (byte lane) of the most recently consumed injected error — handoff
+    // from consume_cycle_error to care_on_injected_error (same service call).
+    uint8_t last_consumed_chip{0};
     uint64_t stat_care_retirement_count{0};
     uint64_t stat_care_proactive_page_count{0};  // pages retired by proactive batches
 
@@ -344,12 +444,21 @@ public:
     // Construct the ECC cache after all config setters ran (MEMORY_CONTROLLER::initialize)
     void init_care_cache();
 
+    // Paper set-index geometry, from MEMORY_CONTROLLER::initialize (before any access).
+    void set_care_dram_geometry(uint64_t channels, uint64_t banks_per_channel, uint64_t rows);
+    // set = global_bank_id * row_groups + row-MSB group (paper III.B.3 layout)
+    size_t care_set_index(uint64_t bank_key, uint64_t row) const {
+        uint64_t global_bank_id = (bank_key >> 32) * care_banks_per_channel + (bank_key & 0xFFFFFFFFULL);
+        return static_cast<size_t>(global_bank_id * care_row_groups + (row >> care_row_group_shift));
+    }
+
     // Every DRAM read (first service of the packet): decode latency / retirement decision.
-    CareEccCache::ReadOutcome care_on_read(uint64_t pa, uint32_t cpu_idx);
+    CareEccCache::ReadOutcome care_on_read(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row);
     // Every DRAM write (first service): S1→S2 confirmation.
-    void care_on_write(uint64_t pa);
+    void care_on_write(uint64_t pa, uint64_t bank_key, uint64_t row);
     // Injected error consumed by a read packet: registration attempt (no latency).
-    void care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint8_t bank_idx = 0);
+    // Chip comes from the consumed fault (clustered) or an address hash (uniform).
+    void care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row);
 
     uint64_t get_stat_care_retirement_count() const { return stat_care_retirement_count; }
     void print_care_stats() const;
@@ -361,6 +470,11 @@ public:
         }
 
         uint64_t current_cycle = current_time.time_since_epoch().count() / cpu_clock_period.count();
+
+        if (spatial_model == ErrorSpatialModel::CLUSTERED) {
+            update_clustered_errors(current_cycle);
+            return;
+        }
 
         // last_error_cycle is now used as "next_error_cycle"
         // If current cycle reaches the next scheduled error cycle, trigger error
@@ -379,14 +493,40 @@ public:
         }
     }
 
-    // Consume one error from the counter (called from service_packet)
-    bool consume_cycle_error() {
+    // Consume one error for the read currently being serviced (service_packet).
+    // UNIFORM: any read drains the counter (legacy). CLUSTERED: the read must
+    // fall inside a pending manifestation's fault region (or anchor a new fault).
+    // bank_key = (dram channel << 32) | bank_request_index, row = DRAM row.
+    bool consume_cycle_error(uint64_t pa, uint64_t bank_key, uint64_t row) {
+        if (spatial_model == ErrorSpatialModel::CLUSTERED) {
+            return consume_clustered_error(get_cache_line_addr(pa), bank_key, row);
+        }
         if (pending_error_count > 0) {
             pending_error_count--;
+            record_error_location(get_cache_line_addr(pa), bank_key, row);
+            // Uniform errors carry no fault identity: derive the byte lane
+            // (chip) deterministically from the line address.
+            last_consumed_chip = static_cast<uint8_t>(((pa >> 6) * 0x9E3779B97F4A7C15ULL) >> 61);
             return true;
         }
         return false;
     }
+
+    // Spatial fault model configuration
+    void set_error_spatial_model(ErrorSpatialModel m) { spatial_model = m; }
+    ErrorSpatialModel get_error_spatial_model() const { return spatial_model; }
+    void set_error_seed(uint64_t seed) { error_seed = seed; }
+    uint64_t get_error_seed() const { return error_seed; }
+    void set_fault_mode_weights(double cell, double row, double bank) {
+        fault_weight_cell = cell; fault_weight_row = row; fault_weight_bank = bank;
+    }
+    void set_fault_reuse_prob(double p) { fault_reuse_prob = p; }
+    void set_error_starvation_cycles(uint64_t cycles) { error_starvation_cycles = cycles; }
+    // Prints the clustered-model section when active (no-op under UNIFORM,
+    // keeping legacy output byte-identical). Safe to call from any stats path.
+    void print_spatial_fault_stats() const;
+    // Opt-in location histogram printing for UNIFORM runs (comparison data).
+    void set_location_stats_enabled(bool enabled) { location_stats_enabled = enabled; }
 
     // Extract page number from physical address
     static champsim::page_number get_page_number(champsim::address addr) {
@@ -420,6 +560,20 @@ public:
     void print_error_pages() const;
 
 private:
+    // Spatial fault model internals (error_page_manager.cc)
+    void update_clustered_errors(uint64_t current_cycle);
+    bool consume_clustered_error(uint64_t cl_addr, uint64_t bank_key, uint64_t row);
+    void spawn_manifest(uint64_t fire_cycle);
+    size_t select_fault_for_manifest();
+    void on_page_retired_clustered(uint64_t page_base);
+    void record_error_location(uint64_t cl_addr, uint64_t bank_key, uint64_t row) {
+        bank_manifest_hist[bank_key]++;
+        row_manifest_hist[{bank_key, row}]++;
+        line_manifest_hist[cl_addr]++;
+    }
+    void print_location_histograms() const;
+    void print_clustered_stats() const;
+
     // Internal helpers.
     // queue_llc_sweep=false: CARE has no LLC error ways and the sweep consumer
     // (cache.cc) is pinning-gated — queueing would only grow the vector unbounded.

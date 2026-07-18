@@ -445,6 +445,34 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
     if 'baseline_retirement_threshold' in error_page_manager:
         yield f'  epm.set_baseline_retirement_threshold({error_page_manager["baseline_retirement_threshold"]});'
 
+    # Spatial fault model (clustered Poisson injection). Emitted only when
+    # clustered: existing uniform configs keep byte-identical generated code.
+    spatial_model = error_page_manager.get('error_spatial_model', 'uniform')
+    if spatial_model == 'clustered':
+        # Mode mix defaults: CARE Table II permanent-fault FIT ratios (18.6:8.2:10.0).
+        # Ratios only — the temporal rate stays on error_cycle_interval.
+        w_cell = float(error_page_manager.get('fault_weight_cell', 18.6))
+        w_row = float(error_page_manager.get('fault_weight_row', 8.2))
+        w_bank = float(error_page_manager.get('fault_weight_bank', 10.0))
+        reuse_prob = float(error_page_manager.get('fault_reuse_prob', 0.7))
+        starvation = int(error_page_manager.get('error_starvation_cycles', 1000000))
+        seed = int(error_page_manager.get('error_seed', 54321))
+        if min(w_cell, w_row, w_bank) < 0 or (w_cell + w_row + w_bank) <= 0:
+            raise ValueError(f'error_page_manager fault weights must be non-negative with a positive sum, got {w_cell}/{w_row}/{w_bank}')
+        if not 0.0 <= reuse_prob < 1.0:
+            raise ValueError(f'error_page_manager.fault_reuse_prob must be in [0, 1), got {reuse_prob}')
+        yield '  epm.set_error_spatial_model(ErrorSpatialModel::CLUSTERED);'
+        yield f'  epm.set_error_seed({seed}ULL);'
+        yield f'  epm.set_fault_mode_weights({w_cell}, {w_row}, {w_bank});'
+        yield f'  epm.set_fault_reuse_prob({reuse_prob});'
+        yield f'  epm.set_error_starvation_cycles({starvation}ULL);'
+    elif spatial_model != 'uniform':
+        raise ValueError(f'error_page_manager.error_spatial_model must be "uniform" or "clustered", got {spatial_model!r}')
+
+    # Location histograms in UNIFORM runs (opt-in; clustered prints them always)
+    if error_page_manager.get('error_location_stats', False):
+        yield '  epm.set_location_stats_enabled(true);'
+
     # CARE comparison scheme (HPCA'21) configuration.
     # Emitted only when care is enabled: existing configs keep byte-identical
     # generated code (in-code defaults already match the disabled state).
@@ -465,8 +493,10 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
             yield '  epm.set_care_demand_scrub(true);'
         if error_page_manager.get('care_proactive', False):
             yield '  epm.set_care_proactive(true);'
-        if error_page_manager.get('care_proactive_or', False):
-            yield '  epm.set_care_proactive_or(true);'
+        # Trigger condition: OR (default) fires on saturation or bias alone;
+        # explicit false restores the paper's literal AND condition.
+        proactive_or = bool(error_page_manager.get('care_proactive_or', True))
+        yield f'  epm.set_care_proactive_or({"true" if proactive_or else "false"});'
 
     if 'debug' in error_page_manager:
         yield f'  epm.set_debug({error_page_manager["debug"]});'

@@ -1346,6 +1346,7 @@ void CACHE::print_error_way_stats() const
     if (epm.is_care_enabled()) {
       epm.print_care_stats();
     }
+    epm.print_spatial_fault_stats();
     epm.print_per_cpu_error_stats();
     return;
   }
