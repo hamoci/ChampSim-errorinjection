@@ -46,6 +46,28 @@ region ∩ page = 각 page의 얇은 슬라이스이고, "region에 포함된 pa
   일어나므로 OS-side 목록 사용은 구현 비용 0. 시뮬레이터의 observed_pages는
   그 OS 기록의 대리.
 
+## 2b. Global Counter = Device(lane) 단위라는 해석의 원문 근거 (2026-07-18 엄밀 재검증)
+
+논문 텍스트에 "bank" 표현이 섞여 있어 재검증한 결과. 증거 사슬:
+
+1. **Local counter의 정의** (p.536): "each local error counter counts the number of
+   detected errors in the **8×1 byte column**" — Fig.1의 0B~7B 열 = DDR3 x8 BL8에서
+   **device i가 기여한 8B**. local counter는 정의상 device별.
+2. **1:1 누적** (p.537): retire 시 "local error counters are accumulated to the
+   **corresponding** global error counters" — local i → global i. 따라서 global i의
+   내용물은 device i의 누적 에러. entry에 bank 필드가 없고 set index가 bank를 이미
+   고정하므로 다른 배선 해석 자체가 불가능.
+3. **귀류** — counter를 논리적(rank-level) bank로 읽으면: 한 set은 한 bank만 담으므로
+   counter 1개만 증가 → bias ≡ counter 값 → 모든 set이 4~5회 retirement에 무조건
+   발화 → "편중 감지" 설계 목적 붕괴. p.539의 "8개 counter를 8개 uniform 확률변수로"
+   신뢰도 유도도 성립 불가 (set 안에서 에러를 8-way로 나누는 축은 device뿐).
+4. **"one counter for a DRAM bank"(p.538)의 해소**: DRAM bank는 device마다 물리적으로
+   존재 (rank의 bank 3 = 8개 chip 각각의 bank-3 array). counter i의 "bank" =
+   **chip i 내부의 해당 bank array** — p.539의 "biased toward a particular
+   **chip or bank**"가 이 독해를 확정.
+
+→ 결론: chip(lane)별 counter 구현이 유일하게 정합하는 해석. 리뷰어 대응용으로 보존.
+
 ## 3. Set Index의 지오메트리 일반화 (DDR3 → DDR5)
 
 ### 일반 규칙 (구현: `set_care_dram_geometry`)
