@@ -122,6 +122,40 @@ X를 백만 번 읽어도 큐에 이벤트가 없으면 에러는 0번. "X가 er
 정확한 뜻은 "**F의 구역에 X가 있다** → F 몫의 예산이 발행되어 있을 때 X를 읽으면
 또 에러가 난다"이지, X를 읽는 행위가 에러를 만든다는 뜻이 아니다.
 
+### 3.6 시간축의 수학 — "1e-8이 여전히 1e-8"인 이유
+
+주입 간격은 지수분포, 개수는 Poisson분포다:
+
+```
+X ~ Exp(λ),  λ = 1/interval          (라벨 1e-8 ↔ interval = 144,000 cycles)
+f(x) = λe^(−λx),   E[X] = 1/λ = 144,000
+
+T cycle 동안의 에러 개수:  N(T) ~ Poisson(λT)
+P(N=k) = (λT)^k e^(−λT) / k!,   E[N] = T/144,000,   SD = √(λT)
+```
+
+검증 예 (mcf 20M instr, T = 55.65M cycles):
+E[N] = 55,650,000 / 144,000 = **386.5**, SD ≈ 19.7 → 관측 **390** (0.18σ) ✓
+
+**구모델과의 일치 — 같은 λ의 같은 프로세스**: 레거시 uniform 모드도 다음 발생
+시각을 X ~ Exp(1/interval)로 뽑았다. 즉 두 모델은 정의상 동일한 rate의 Poisson
+process이며, "1e-8"이라는 라벨의 의미(λ = 1/144,000)는 바뀐 적이 없다.
+미세 구현 차이 두 개는 모두 무시 가능 규모:
+
+1. 레거시는 발화 시 "현재 cycle"에서 다음 시각을 재기점 → 이벤트당 잔차 ≤ DRAM
+   1 tick(CPU 3~4 cycle) = interval의 **0.003%** 편향
+2. 레거시는 호출당 최대 1발 (clustered는 catch-up while로 진짜 Poisson) → 한 tick에
+   2발 이상 몰릴 확률 ≈ (4/144,000)²/2 ≈ **4×10⁻¹⁰**
+
+공간축(fault/reuse/앵커)은 "누구의 에러이고 어디로 가는가"만 정할 뿐 발생 개수에
+관여하지 않고, 기아 단계 확장이 배달을 보장하므로 E[N]이 실제 소비량으로 이어진다
+(문서화된 예외: off@1e-8 극한의 대량 영구 retire → 09 §5).
+
+실측 대조: uniform 453 vs clustered 454/456 (E≈444) · 3,837 vs 3,839 (E≈3,888) ·
+멀티코어 6,185 vs 6,059 — 전부 ±√N 이내. 기억용 한 줄: 지수분포의 무기억성
+P(X>s+t | X>s) = P(X>t)가 "일정 주기가 아니라 언제든 같은 확률"의 수학적 표현이고,
+그 귀결이 Poisson 개수 분포다.
+
 ## 4. 주사위 3(chip)의 엄밀한 의미 — 주소는 chip을 결정하지 않는다
 
 x8 rank에서 64B 블록은 8개 die가 8B씩 내놓아 만들어진다:
@@ -264,6 +298,19 @@ fault의 이벤트 1건이며, fault는 살아남아 또 뽑힐 수 있다.
 사라짐). 뭉침의 정도 = (fault 수 : 예산) 비율이며 reuse가 통제한다. 각주:
 등록된 특정 line들의 재-read 비용(CARE decode)은 레이어 2의 일이고 그 line들에
 한정 — "구역 전체"가 비용을 내는 게 아니다.
+
+**Q13. 논문은 global counter가 "bank"라는데, lane(chip)으로 구현한 게 맞나?**
+맞다 — 그리고 논문도 틀리지 않았다 (전문 적대적 재검증, 07 §2b). "DRAM bank"의
+지시 대상이 rank-level 논리 bank가 아니라 **chip 내부의 bank array**다: rank의
+bank b는 물리적으로 8개 chip 각각의 bank-b 조각의 합집합이고, set index가
+(ch,rank,bank)를 고정하므로 counter i = "chip i의 그 bank 조각". 이 독해에서
+"one counter for a DRAM bank"는 정확한 문장이 된다. rank-level 독해는 세 논증으로
+붕괴: ① set index가 bank 비트를 전부 소비 → 한 set = 단일 bank → counter 7개가
+영구 0, 논문의 8-uniform-RV 통계 성립 불가 ② entry에 bank 필드가 없어
+bank-indexed 누적은 구현 자체가 불가 (lane은 local[i]→global[i] 위치 배선으로 완결)
+③ lockstep 구조상 rank-level bank 고장은 8 lane을 균등하게 깨뜨려 bias가 생길 수
+없음 — bias 검출기가 잡을 수 있는 것은 chip(과 chip 내부 bank)뿐. 원문 인용 전체는
+07 §2b.
 
 ## 9. "Fault-injection modeling 어떻게 구현했어?" — 교수님께 한 호흡으로
 
