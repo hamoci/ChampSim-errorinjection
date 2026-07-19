@@ -436,9 +436,12 @@ void ErrorPageManager::init_care_cache() {
     care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways, care_proactive, care_proactive_or);
 }
 
-void ErrorPageManager::set_care_dram_geometry(uint64_t channels, uint64_t banks_per_channel, uint64_t rows) {
+void ErrorPageManager::set_care_dram_geometry(uint64_t channels, uint64_t banks_per_channel, uint64_t rows,
+                                              uint64_t row_bit_offset) {
     care_banks_per_channel = banks_per_channel;
     care_total_banks = channels * banks_per_channel;
+    care_row_bit_offset = row_bit_offset;
+    care_row_count = rows;
     if (care_total_banks == 0 || care_ecc_sets % care_total_banks != 0) {
         fmt::print("[ERROR_PAGE_MANAGER] FATAL: care_ecc_sets ({}) must be a multiple of total DRAM banks ({} = {} ch x {}/ch) for the paper set index\n",
                    care_ecc_sets, care_total_banks, channels, banks_per_channel);
@@ -458,6 +461,25 @@ void ErrorPageManager::set_care_dram_geometry(uint64_t channels, uint64_t banks_
                care_total_banks, care_row_groups, care_row_group_shift, care_ecc_sets);
 }
 
+// Paper-literal proactive victims (III.C): every allocated page whose row range
+// overlaps the triggering set's row-group. With fine block interleaving each such
+// page has blocks in the region's (bank, row) pairs, so this is exactly "all the
+// pages that contain all the rows the set is designed to protect". Excludes pages
+// already permanently retired. Sorted for deterministic retirement order.
+std::vector<uint64_t> ErrorPageManager::care_region_victim_pages(uint64_t row_group) const {
+    std::vector<uint64_t> pages;
+    for (uint64_t page_num : current_ppage) {
+        uint64_t page_base = page_num << LOG2_PAGE_SIZE;
+        uint64_t r0 = care_row_of_pa(page_base) >> care_row_group_shift;
+        uint64_t r1 = care_row_of_pa(page_base + PAGE_SIZE - 1) >> care_row_group_shift;
+        if (r0 <= row_group && row_group <= r1 && clustered_retired_pages.count(page_base) == 0) {
+            pages.push_back(page_base);
+        }
+    }
+    std::sort(pages.begin(), pages.end());
+    return pages;
+}
+
 CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row) {
     uint64_t cl_addr = get_cache_line_addr(pa);
     size_t set = care_set_index(bank_key, row);
@@ -474,7 +496,9 @@ CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t c
         // the triggering page is still in the observed list here.
         std::vector<uint64_t> proactive_victims;
         if (out.proactive) {
-            proactive_victims = care_cache->region_error_pages(set);
+            proactive_victims = care_region_victims
+                ? care_region_victim_pages(row >> care_row_group_shift)   // paper-literal
+                : care_cache->region_error_pages(set);                    // evidence-based
         }
 
         size_t invalidated = care_cache->invalidate_page(page_base);
@@ -502,7 +526,8 @@ CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t c
                 }
             }
             // Always-on event log (plan P3b): region = (bank, row-group)
-            fmt::print("[CARE][PROACTIVE] set={} biased_chip={} bias={} bank_key=0x{:x} row_group={} victims={} pages=[",
+            fmt::print("[CARE][PROACTIVE] mode={} set={} biased_chip={} bias={} bank_key=0x{:x} row_group={} victims={} pages=[",
+                       care_region_victims ? "region" : "observed",
                        set, out.biased_chip, out.bias, bank_key, row >> care_row_group_shift, proactive_victims.size());
             for (size_t i = 0; i < proactive_victims.size(); i++) {
                 fmt::print("{}0x{:x}", i ? " " : "", proactive_victims[i]);

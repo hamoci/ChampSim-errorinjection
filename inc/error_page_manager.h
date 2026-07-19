@@ -256,6 +256,13 @@ private:
     uint64_t care_total_banks{0};         // channels * banks_per_channel
     uint64_t care_row_groups{0};          // care_ecc_sets / total_banks
     uint64_t care_row_group_shift{0};     // row_bits - log2(row_groups)
+    uint64_t care_row_bit_offset{0};      // PA bit position of the row field (plain slice)
+    uint64_t care_row_count{0};           // number of rows (mask = care_row_count - 1)
+    // Proactive victim mode. false (default): evidence-based — pages with observed
+    // errors in the region. true: paper-literal — every ALLOCATED page whose row
+    // range overlaps the set's row-group (with 2MB pages + fine interleaving this
+    // retires ~2GB per trigger; see 07_care_design_analysis.md §2).
+    bool care_region_victims{false};
     // Chip (byte lane) of the most recently consumed injected error — handoff
     // from consume_cycle_error to care_on_injected_error (same service call).
     uint8_t last_consumed_chip{0};
@@ -445,7 +452,10 @@ public:
     void init_care_cache();
 
     // Paper set-index geometry, from MEMORY_CONTROLLER::initialize (before any access).
-    void set_care_dram_geometry(uint64_t channels, uint64_t banks_per_channel, uint64_t rows);
+    // row_bit_offset = PA bit position of the (unswizzled) row field.
+    void set_care_dram_geometry(uint64_t channels, uint64_t banks_per_channel, uint64_t rows,
+                                uint64_t row_bit_offset);
+    void set_care_region_victims(bool enabled) { care_region_victims = enabled; }
     // set = global_bank_id * row_groups + row-MSB group (paper III.B.3 layout)
     size_t care_set_index(uint64_t bank_key, uint64_t row) const {
         uint64_t global_bank_id = (bank_key >> 32) * care_banks_per_channel + (bank_key & 0xFFFFFFFFULL);
@@ -560,6 +570,12 @@ public:
     void print_error_pages() const;
 
 private:
+    // CARE region-victim internals (error_page_manager.cc)
+    uint64_t care_row_of_pa(uint64_t pa) const {
+        return (pa >> care_row_bit_offset) & (care_row_count - 1);
+    }
+    std::vector<uint64_t> care_region_victim_pages(uint64_t row_group) const;
+
     // Spatial fault model internals (error_page_manager.cc)
     void update_clustered_errors(uint64_t current_cycle);
     bool consume_clustered_error(uint64_t cl_addr, uint64_t bank_key, uint64_t row);

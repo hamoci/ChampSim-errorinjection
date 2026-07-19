@@ -583,9 +583,12 @@ void MEMORY_CONTROLLER::initialize()
     }
     // Paper set index (III.B.3): channel | rank/bankgroup/bank | row MSBs.
     // banks_per_channel must match DRAM_CHANNEL::bank_request_index's fold.
+    // The row field is a plain (unswizzled) PA bit slice; its offset lets the
+    // EPM compute row ranges of pages for paper-literal proactive victims.
     epm.set_care_dram_geometry(std::size(channels),
                                address_mapping.ranks() * address_mapping.bankgroups() * address_mapping.banks(),
-                               address_mapping.rows());
+                               address_mapping.rows(),
+                               champsim::to_underlying(get<DRAM_ADDRESS_MAPPING::SLICER_ROW_IDX>(address_mapping.address_slicer).lower));
     epm.init_care_cache();
     fmt::print("[ERROR_PAGE_MANAGER] CARE scheme: ON (ECC cache {} sets x {} ways, BCH decode {} cycles)\n",
                epm.get_care_ecc_sets(), epm.get_care_ecc_ways(), epm.get_care_bch_decode_cycles());

@@ -46,6 +46,20 @@ region ∩ page = 각 page의 얇은 슬라이스이고, "region에 포함된 pa
   일어나므로 OS-side 목록 사용은 구현 비용 0. 시뮬레이터의 observed_pages는
   그 OS 기록의 대리.
 
+### 정량 비교와 모드 전환 (2026-07-20 추가, 사용자 결정)
+
+문자적 정의가 병리적이 되는 이유를 수치로: 우리 구성(32GB, 64 banks, row 8KB/bank)
+에서 한 2MB page는 시스템 row ~4개에 걸치므로, region(1 bank × 4096 rows = **32MB**)
+의 row를 포함하는 page = 4096/4 ≈ **1024개 × 2MB = 2GB** — faulty 구역의 64배를
+격리하게 된다. 근본 원인은 containment 붕괴: 논문(coarse 매핑)은 page ⊂ region,
+우리(block interleave)는 page ∩ region = page의 ~1/64 슬라이스.
+
+그럼에도 proactive 발화 자체가 희귀 이벤트이므로(아래 §및 05 V8), **논문 문자
+그대로의 의미론도 `care_proactive_victims: "region"` 모드로 구현**했다 (기본은
+`"observed"`): 할당된 page(current_ppage) 중 row-range가 트리거 set의 row-group과
+겹치는 것 전부를 retire. 두 모드는 `[CARE][PROACTIVE] mode=...` 로그로 구분되며,
+observed vs region victim 수의 실측 대비가 ablation 데이터가 된다.
+
 ## 2b. Global Counter = Device(lane) 단위 — 적대적 전문 재검증 (2026-07-19 확정)
 
 "탑티어 논문이 bank라고 썼는데 그게 틀렸다는 전제가 이상하다"는 문제 제기(정당함)에

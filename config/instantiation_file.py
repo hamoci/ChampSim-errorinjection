@@ -497,6 +497,13 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         # explicit false restores the paper's literal AND condition.
         proactive_or = bool(error_page_manager.get('care_proactive_or', True))
         yield f'  epm.set_care_proactive_or({"true" if proactive_or else "false"});'
+        # Proactive victim mode: 'observed' (default, evidence-based) or
+        # 'region' (paper-literal: every allocated page overlapping the row-group).
+        victims = error_page_manager.get('care_proactive_victims', 'observed')
+        if victims == 'region':
+            yield '  epm.set_care_region_victims(true);'
+        elif victims != 'observed':
+            raise ValueError(f'error_page_manager.care_proactive_victims must be "observed" or "region", got {victims!r}')
 
     if 'debug' in error_page_manager:
         yield f'  epm.set_debug({error_page_manager["debug"]});'
