@@ -46,27 +46,54 @@ region ∩ page = 각 page의 얇은 슬라이스이고, "region에 포함된 pa
   일어나므로 OS-side 목록 사용은 구현 비용 0. 시뮬레이터의 observed_pages는
   그 OS 기록의 대리.
 
-## 2b. Global Counter = Device(lane) 단위라는 해석의 원문 근거 (2026-07-18 엄밀 재검증)
+## 2b. Global Counter = Device(lane) 단위 — 적대적 전문 재검증 (2026-07-19 확정)
 
-논문 텍스트에 "bank" 표현이 섞여 있어 재검증한 결과. 증거 사슬:
+"탑티어 논문이 bank라고 썼는데 그게 틀렸다는 전제가 이상하다"는 문제 제기(정당함)에
+따라, **전문(12p)을 두 명의 독립 변론자에게 읽혀 각각 'rank-level bank 해석'과
+'byte-lane/device 해석'의 최강 변론을 구성**하게 하는 적대적 검증을 수행했다.
 
-1. **Local counter의 정의** (p.536): "each local error counter counts the number of
-   detected errors in the **8×1 byte column**" — Fig.1의 0B~7B 열 = DDR3 x8 BL8에서
-   **device i가 기여한 8B**. local counter는 정의상 device별.
-2. **1:1 누적** (p.537): retire 시 "local error counters are accumulated to the
-   **corresponding** global error counters" — local i → global i. 따라서 global i의
-   내용물은 device i의 누적 에러. entry에 bank 필드가 없고 set index가 bank를 이미
-   고정하므로 다른 배선 해석 자체가 불가능.
-3. **귀류** — counter를 논리적(rank-level) bank로 읽으면: 한 set은 한 bank만 담으므로
-   counter 1개만 증가 → bias ≡ counter 값 → 모든 set이 4~5회 retirement에 무조건
-   발화 → "편중 감지" 설계 목적 붕괴. p.539의 "8개 counter를 8개 uniform 확률변수로"
-   신뢰도 유도도 성립 불가 (set 안에서 에러를 8-way로 나누는 축은 device뿐).
-4. **"one counter for a DRAM bank"(p.538)의 해소**: DRAM bank는 device마다 물리적으로
-   존재 (rank의 bank 3 = 8개 chip 각각의 bank-3 array). counter i의 "bank" =
-   **chip i 내부의 해당 bank array** — p.539의 "biased toward a particular
-   **chip or bank**"가 이 독해를 확정.
+### 최종 판정 — 논문은 틀리지 않았다. "bank"의 지시 대상이 다를 뿐이다
 
-→ 결론: chip(lane)별 counter 구현이 유일하게 정합하는 해석. 리뷰어 대응용으로 보존.
+> **"one counter for a DRAM bank"(p.538)의 "DRAM bank" = chip 내부의 물리 bank
+> array** (rank의 bank b는 물리적으로 8개 device 각각의 bank-b array의 합집합).
+> set index가 (ch, rank, bank)를 고정하므로, counter i = "chip i가 가진 그 bank
+> array" — 이 독해에서 논문의 모든 문장이 참이 되고, rank-level 논리 bank 독해만
+> 구조적으로 붕괴한다. **bank-해석 변론자 스스로 이 결론에 도달**했다.
+
+### Rank-level bank 독해가 붕괴하는 세 개의 독립 논증
+
+1. **Index 논증** (치명): "the index bits ... composed of channel, rank, bank, and
+   the highest bits of a row" (p.536) + 비트 예산 1+2+3+4=10 (p.537) — bank 비트
+   3개가 전부 index에 소비되어 **한 set = 단일 bank**. rank-level 독해면 set당
+   counter 8개 중 7개가 영구히 0 → "max−min ≥ 12" 검사와 "8개 uniform 확률변수"
+   통계(p.539)가 무의미해짐. 보강 인용(p.536): "each error counter can now be
+   associated with the **predetermined** channel, rank, bank, and row" — bank
+   연관성은 counter 배열이 아니라 **index의 속성** (set의 단일 bank에 공통 귀속).
+2. **하드웨어 폐쇄성 논증**: entry 저장 내용 = tag + BCH 61b + valid + state 2b +
+   **local counter 8×2b가 전부** (p.536, Fig.2a) — per-entry bank 필드가 없어
+   bank-indexed 누적은 저장된 상태로부터 **구현 자체가 불가능**. 반면 lane-indexed
+   누적은 저장된 것만으로 완결: local i(8×1 byte column별 에러 수, p.536, Fig.1/2b의
+   XOR→OR→adder tree 회로는 주소 입력이 없음) → "accumulated to the **corresponding**
+   global error counters" (p.537) = 위치 보존 배선 local[i]→global[i].
+3. **물리 논증**: DDR3 rank의 device들은 lockstep — 진짜 rank-level bank 고장은
+   **8개 lane을 균등하게** 깨뜨려 counter 간 bias를 만들 수 없다. bias 검출기가
+   rank-level bank를 측정한다는 해석은 물리적으로도 불가능. 반대로 chip i의 bank
+   고장은 lane i만 편중 — p.539의 결론 문구 "biased toward a particular **chip or
+   bank**"가 정확해지는 유일한 독해 (rank-level 독해에서 "chip"은 설명 불가).
+
+### 부수 확인
+
+- Table I "×8" 구성이 핵심: data device 8개 ↔ 8×1 byte column 8개 ↔ counter 8개가
+  정확히 1:1 (x4였으면 16 lane이라 이 대응이 흐려짐). Table II의 fault model도
+  "FIT for 1Gb DRAM **chips**" — Single Bank = chip 내부 bank 고장으로 정의됨.
+- Table I "Banks per channel: 8"은 본문 "8 banks per rank"(p.537)와 모순 — DDR3
+  규격상 표의 오기로 판단.
+- 정직한 약점 (변론자 명시): 논문에 "byte lane"/"device index"라는 단어 자체는 없다.
+  본 독해는 Fig.1/2(b)의 기하 + DDR3 물리 구조에서 도출된 것 (의도 신뢰도 ~90%,
+  "기술된 하드웨어와 정합하는 유일한 독해"로서는 ~99%).
+
+→ **구현 결론 불변**: chip(lane)별 counter가 논문에 충실한 구현이며, 이제 그 근거는
+"논문의 오기 정정"이 아니라 "논문의 정확한 독해"다. 리뷰어 대응용으로 보존.
 
 ## 3. Set Index의 지오메트리 일반화 (DDR3 → DDR5)
 
