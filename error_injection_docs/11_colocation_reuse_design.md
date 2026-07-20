@@ -110,6 +110,32 @@ birth_fault():
    원래 bank 전체라 row 개념이 약함. → BANK co-located는 `"bank"`처럼 동작(bank+chip
    상속), CELL/ROW co-located만 row까지 상속. (구현 시 mode별 분기.)
 
+## 9b. 파라미터 실제값 근거 (grounded / accelerated / swept·calibrated)
+
+cherry-pick을 피하려면 각 파라미터의 값 출처를 **3범주로 명시**한다. 논문에도 "어느 값이
+문헌 고정 / 어느 값이 가속 / 어느 값이 sweep·calibrate인지" 표로 밝힐 것.
+
+| 파라미터 | 범주 | 실제값 / 출처 |
+|---|---|---|
+| `fault_weight_cell/row/bank` (mode 비율) | **grounded (문헌 고정)** | CARE HPCA'21 **Table II** permanent-FIT: single-bit **18.6** / single-row **8.2** / single-bank **10.0** (원출처 Sridharan & Liberty, SC'12 필드). 그대로 사용 |
+| CARE 하드웨어 (1024 set · 2 way · 8×4-bit counter · **bias≥12** · **sat 15** · BCH **30cyc** · retire threshold) | **grounded** | CARE HPCA'21 §III. 이미 구현·사용 중 |
+| `error_cycle_interval` (발생률) | **accelerated (표준 논법)** | FIT 절대값(10⁹ device·hr당)은 수십 ms 창에서 ~0건이라 사용 불가 → 가속 주입 스케일(1e-5~1e-8 sweep). "발생률은 가속, 공간 구성비는 문헌" = accelerated fault injection 표준 |
+| `fault_density_bank` (bank 결함 밀도) | **swept / calibrated** | 필드에 "bank의 몇 %"라는 직접 값 없음. 제약: CE-correctable이어야 함(else UE=장비교체). → **sweep**(0.02~0.5)하거나, 관측 CE rate를 재현하도록 **calibrate** |
+| `fault_colocate_prob` (결함 공간상관) | **swept / calibrated** | 필드는 **강한 공간 상관**을 보고(Sridharan et al. SC'13 "Feng Shui"; Meza et al. DSN'15 — 소수 영역이 대부분 에러 유발) 하나 clean한 단일 p는 없음. → **sweep**(0/0.3/0.6/0.9)하거나, 필드의 "재발 위치발 에러 비율" 또는 "결함당 에러 분포"를 재현하도록 **calibrate** |
+
+**원칙:**
+1. **grounded는 논문값 고정** — FIT 비율, CARE 하드웨어 임계는 절대 임의로 안 바꿈.
+2. **swept는 sweep해서 곡선으로 보고** — density·colocate_prob는 단일 magic number 대신
+   "값 vs (bias/발화/성능)" 곡선. p는 "결함이 얼마나 뭉치나"라는 **물리적 의미를 가진 축**.
+3. **calibrated가 더 강함** — 가능하면 (density, colocate_prob)를 **필드의 관측 통계
+   (결함당 에러 분포·재발 비율)를 재현하도록 맞춤** → "임의값"이 아니라 "필드 재현값"이 됨.
+4. **정직성 표기 필수** — 리뷰어가 cherry-pick을 의심하지 않도록, 세 범주를 논문에 명시.
+
+> 주의: 위 문헌값 중 FIT 비율(18.6/8.2/10.0)과 CARE 하드웨어 임계는 repo 문서(02, 07)에서
+> 이미 검증됨. density·colocate는 **문헌에 직접 값이 없어** sweep/calibrate가 정당한
+> 경로다. 논문 작성 시 Sridharan SC'12/SC'13, Meza DSN'15의 정확한 수치를 재확인해
+> "값" 또는 "범위 근거"로 인용할 것.
+
 ## 9. 검증 계획 (구현 후)
 
 1. p=0 → 기존 sticky bit-identical.
