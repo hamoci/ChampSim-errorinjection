@@ -116,41 +116,64 @@ bool CareEccCache::on_write(uint64_t line_addr, std::size_t set)
   return true;
 }
 
-// Replacement when the set is full (pick_victim is only reached with no free way).
-// - Any S3 block -> return nullptr: it retires on the next read and frees its own
-//   way, so don't disturb it (drop the newcomer this once).
-// - Otherwise EVICT the lowest-err_count block (least re-detected = most likely a
-//   stuck S1 occupying a way without progressing); ties prefer the least-progressed
-//   state (S1 over S2), then lowest index, so blocks already advancing toward
-//   retirement (S2, or re-read with higher err_count) are kept.
+// Paper Pseudocode 1 (verified against CARE HPCA'21 Fig 2 / Pseudocode 1).
+// - Any S3 block in the set -> no replacement (it retires on the next read and
+//   frees its own way).
+// - Otherwise replace the minimum-err_count block ONLY if that minimum is below
+//   the newcomer's total error count Err(new); ties prefer the unique block in
+//   state <= S1, else lowest index (deterministic stand-in for the paper's random
+//   pick — see header).
 //
-// This restores the paper's evict-low-value intent. The previous
-// `err_min >= err_new(=1)` guard degenerated to NEVER-EVICT under single-error
-// registration (every resident has err_count >= 1 = newcomer), which locked sets
-// onto stuck blocks and dropped every later error -> reactive retirements could
-// not accumulate per set -> proactive global counters never grew (bias stalled).
+// Err(new) is the newcomer's total error count over the 8 byte-column counters
+// (paper Fig 2). It exceeds a resident's minimum only for MULTI-column errors
+// (multiple chips bad in one line = multi-bank/rank faults, excluded here as UE).
+// Our single-chip fault model produces single-column errors, so Err(new)=1 and
+// this degenerates to insert-into-free-way-or-drop — exactly the paper's behavior
+// for single-chip faults. Under realistic (sparse, R1Y-scale) intensity the 2-way
+// set rarely fills (paper contention analysis, Fig 4a), so this is not a throughput
+// limiter; it only bottlenecks under accelerated over-injection.
 CareEccCache::Entry* CareEccCache::pick_victim(std::size_t set)
 {
-  Entry* base = &entries_[set * ways_];
+  constexpr uint32_t err_new = 1;
 
-  // Protect S3: about to retire and free its own way.
+  Entry* base = &entries_[set * ways_];
   for (std::size_t w = 0; w < ways_; ++w) {
     if (base[w].valid && base[w].state == State::S3)
       return nullptr;
   }
 
-  // Evict the lowest-err_count, least-progressed non-S3 block so a fresh block
-  // gets a chance to progress S1->S2->S3->retire.
-  Entry* victim = nullptr;
+  uint32_t err_min = ERR_COUNT_CAP + 1;
+  for (std::size_t w = 0; w < ways_; ++w)
+    err_min = std::min(err_min, base[w].err_count);
+
+  if (err_min >= err_new)
+    return nullptr;
+
+  Entry* only_min = nullptr;
+  std::size_t min_count = 0;
   for (std::size_t w = 0; w < ways_; ++w) {
-    Entry* e = &base[w];
-    if (victim == nullptr
-        || e->err_count < victim->err_count
-        || (e->err_count == victim->err_count && e->state < victim->state)) {
-      victim = e;
+    if (base[w].err_count == err_min) {
+      min_count++;
+      if (only_min == nullptr)
+        only_min = &base[w];
     }
   }
-  return victim;
+  if (min_count == 1)
+    return only_min;
+
+  Entry* only_low_state = nullptr;
+  std::size_t low_state_count = 0;
+  for (std::size_t w = 0; w < ways_; ++w) {
+    if (base[w].err_count == err_min && base[w].state == State::S1) {
+      low_state_count++;
+      if (only_low_state == nullptr)
+        only_low_state = &base[w];
+    }
+  }
+  if (low_state_count == 1)
+    return only_low_state;
+
+  return only_min; // lowest-index deterministic tie-break
 }
 
 CareEccCache::RegisterOutcome CareEccCache::on_error(uint64_t line_addr, std::size_t set, uint8_t chip)
