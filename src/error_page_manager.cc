@@ -115,7 +115,9 @@ void ErrorPageManager::retire_page(uint64_t page_base, bool queue_llc_sweep) {
 
     // 4. Clustered fault model: permanent retirement + fault lifecycle.
     //    UNIFORM keeps the legacy re-registration artifact (bit-identical).
-    if (spatial_model == ErrorSpatialModel::CLUSTERED) {
+    if (spatial_model == ErrorSpatialModel::CLUSTERED || spatial_model == ErrorSpatialModel::STICKY) {
+        // Permanent retire + fault lifecycle (CELL/ROW die, BANK survives).
+        // STICKY has no pending queue, so the resample loop inside is a no-op.
         on_page_retired_clustered(page_base);
     }
 }
@@ -322,9 +324,161 @@ bool ErrorPageManager::consume_clustered_error(uint64_t cl_addr, uint64_t bank_k
     return false;
 }
 
+// ============================================================
+// Sticky hard-fault model (doc 10) — access-driven CE + per-mode density
+// ============================================================
+//
+// Temporal layer: the same seeded Poisson process (mean = error_cycle_interval)
+// now births persistent FAULTS instead of a CE budget. Faults accumulate over
+// time; CELL/ROW die on page retirement, BANK survive.
+//
+// Spatial layer: a fault is a fixed region anchored to the first real access
+// (working-set guarantee). Within the region a line is "bad" with probability
+// fault_density_bank for BANK (a single-bank fault is a scattered subset, NOT
+// the whole bank) and 1.0 for CELL/ROW (dense, tiny footprint). A bad line emits
+// a CE on EVERY access (hard fault). No Poisson CE budget, no starvation
+// widening: clustering is structural, count is bounded physically by density x
+// access rate.
+
+void ErrorPageManager::update_sticky_faults(uint64_t current_cycle) {
+    if (!injection_initialized) {
+        temporal_rng.seed(error_seed);
+        spatial_rng.seed(error_seed ^ 0x9E3779B97F4A7C15ULL);  // decorrelate streams
+        std::exponential_distribution<double> d(1.0 / static_cast<double>(error_cycle_interval));
+        next_error_cycle = current_cycle + std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(d(temporal_rng))));
+        injection_initialized = true;
+    }
+    std::exponential_distribution<double> d(1.0 / static_cast<double>(error_cycle_interval));
+    while (current_cycle >= next_error_cycle) {          // catch-up: true Poisson births
+        birth_fault();
+        next_error_cycle += std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(d(temporal_rng))));
+    }
+}
+
+// Create one persistent fault (mode ~ FIT weights, chip ~ uniform byte lane),
+// left unanchored; the next serviced read fixes its coordinates. No reuse
+// branch: clustering comes from the fault being a fixed region, not resampling.
+void ErrorPageManager::birth_fault() {
+    std::uniform_real_distribution<double> u(0.0, 1.0);
+    double total = fault_weight_cell + fault_weight_row + fault_weight_bank;
+    double r = u(spatial_rng) * total;
+    FaultMode fault_mode = (r < fault_weight_cell)                    ? FaultMode::CELL
+                         : (r < fault_weight_cell + fault_weight_row) ? FaultMode::ROW
+                                                                      : FaultMode::BANK;
+    FaultDomain f{fault_mode};
+    std::uniform_int_distribution<int> chip_pick(0, CareEccCache::NUM_GLOBAL_COUNTERS - 1);
+    f.chip = static_cast<uint8_t>(chip_pick(spatial_rng));
+    f.salt = spatial_rng();   // per-fault hash basis for BANK line density
+    faults.push_back(f);
+    live_fault_indices.push_back(faults.size() - 1);
+    stat_faults_created[static_cast<size_t>(fault_mode)]++;
+    if (debug == 1) {
+        fmt::print("[FAULT] birth fault {} mode={} chip={}\n", faults.size() - 1,
+                   fault_mode == FaultMode::CELL ? "CELL" : fault_mode == FaultMode::ROW ? "ROW" : "BANK", f.chip);
+    }
+}
+
+// Deterministic, sticky per-line bad classification. CELL/ROW: whole (small)
+// region bad. BANK: sparse subset at fault_density_bank (same line -> same
+// verdict across accesses, no per-line storage).
+bool ErrorPageManager::is_bad_line(const FaultDomain& f, uint64_t cl_addr) const {
+    if (f.mode != FaultMode::BANK) return true;   // CELL/ROW dense
+    uint64_t h = (cl_addr ^ f.salt) * 0x9E3779B97F4A7C15ULL;
+    double frac = static_cast<double>(h >> 40) / static_cast<double>(1ULL << 24);  // in [0,1)
+    return frac < fault_density_bank;
+}
+
+bool ErrorPageManager::consume_sticky_error(uint64_t cl_addr, uint64_t bank_key, uint64_t row) {
+    // Reads to a retired page address the migrated-to healthy frame: never error.
+    if (clustered_retired_pages.count(cl_addr & CareEccCache::PAGE_BASE_MASK) > 0) {
+        return false;
+    }
+
+    // (1) Anchor the oldest unanchored fault to this real access — a fault never
+    //     lands on memory the workload does not touch (working-set guarantee).
+    for (size_t idx : live_fault_indices) {
+        FaultDomain& f = faults[idx];
+        if (!f.anchored) {
+            f.anchored = true;
+            f.bank_key = bank_key;
+            f.row = row;
+            f.anchor_cl = cl_addr;
+            stat_anchor_manifests++;
+            break;   // at most one anchor per access
+        }
+    }
+
+    // (2) Access hits a bad line of a live anchored fault -> hard fault -> CE.
+    //     First matching fault wins (any owning fault is physically valid).
+    for (size_t idx : live_fault_indices) {
+        FaultDomain& f = faults[idx];
+        if (!f.anchored) continue;
+        bool in_region =
+            (f.mode == FaultMode::CELL) ? (cl_addr == f.anchor_cl)
+          : (f.mode == FaultMode::ROW)  ? (bank_key == f.bank_key && row == f.row)
+                                        : (bank_key == f.bank_key);   // BANK
+        if (in_region && is_bad_line(f, cl_addr)) {
+            f.manifest_count++;
+            stat_manifests[static_cast<size_t>(f.mode)]++;
+            last_consumed_chip = f.chip;
+            record_error_location(cl_addr, bank_key, row);
+            if (debug == 1) {
+                fmt::print("[FAULT] sticky CE fault {} mode={} cl=0x{:x} bank_key=0x{:x} row={}\n", idx,
+                           f.mode == FaultMode::CELL ? "CELL" : f.mode == FaultMode::ROW ? "ROW" : "BANK",
+                           cl_addr, bank_key, row);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+void ErrorPageManager::print_sticky_stats() const {
+    uint64_t total_faults = stat_faults_created[0] + stat_faults_created[1] + stat_faults_created[2];
+    uint64_t total_manifests = stat_manifests[0] + stat_manifests[1] + stat_manifests[2];
+    size_t unanchored = 0;
+    uint64_t max_manifest = 0;
+    for (const auto& f : faults) {
+        if (!f.dead && !f.anchored) unanchored++;
+        max_manifest = std::max(max_manifest, f.manifest_count);
+    }
+    fmt::print("[ERROR]\n");
+    fmt::print("[ERROR] [Spatial Fault Model (sticky)]\n");
+    fmt::print("[ERROR]   Seed / Birth Interval:          {} / {} cyc\n", error_seed, error_cycle_interval);
+    fmt::print("[ERROR]   BANK Line Density:              {:.4f}\n", fault_density_bank);
+    fmt::print("[ERROR]   Faults Born:                    {} (cell={} row={} bank={})\n",
+               total_faults, stat_faults_created[0], stat_faults_created[1], stat_faults_created[2]);
+    fmt::print("[ERROR]   Faults Killed by Retirement:    {} (cell={} row={})\n",
+               stat_faults_killed[0] + stat_faults_killed[1], stat_faults_killed[0], stat_faults_killed[1]);
+    fmt::print("[ERROR]   Unanchored (waiting) at End:    {}\n", unanchored);
+    fmt::print("[ERROR]   Retired Pages (permanent):      {}\n", clustered_retired_pages.size());
+    fmt::print("[ERROR]   Injected CEs (access-driven):   {} (cell={} row={} bank={})\n",
+               total_manifests, stat_manifests[0], stat_manifests[1], stat_manifests[2]);
+    if (total_faults > 0) {
+        fmt::print("[ERROR]   CEs per Fault (avg/max):        {:.1f} / {}\n",
+                   static_cast<double>(total_manifests) / static_cast<double>(total_faults), max_manifest);
+    }
+    if (!bank_manifest_hist.empty() && total_manifests > 0) {
+        std::vector<std::pair<uint64_t, uint64_t>> sorted(bank_manifest_hist.begin(), bank_manifest_hist.end());
+        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+        fmt::print("[ERROR]   Banks Touched:                  {}\n", sorted.size());
+        fmt::print("[ERROR]   Top Banks (ch/bank_idx: count):");
+        size_t top_n = std::min<size_t>(8, sorted.size());
+        for (size_t i = 0; i < top_n; i++) {
+            fmt::print(" {}/{}:{}", sorted[i].first >> 32, sorted[i].first & 0xFFFFFFFFULL, sorted[i].second);
+        }
+        fmt::print("\n");
+        fmt::print("[ERROR]   Top-1 Bank Share:               {:.1f}%\n",
+                   100.0 * static_cast<double>(sorted[0].second) / static_cast<double>(total_manifests));
+    }
+    print_location_histograms();
+}
+
 void ErrorPageManager::print_spatial_fault_stats() const {
     if (spatial_model == ErrorSpatialModel::CLUSTERED) {
         print_clustered_stats();
+    } else if (spatial_model == ErrorSpatialModel::STICKY) {
+        print_sticky_stats();
     } else if (location_stats_enabled) {
         // UNIFORM comparison data: opt-in only (legacy output stays identical)
         fmt::print("[ERROR]\n");

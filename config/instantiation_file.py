@@ -466,8 +466,25 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         yield f'  epm.set_fault_mode_weights({w_cell}, {w_row}, {w_bank});'
         yield f'  epm.set_fault_reuse_prob({reuse_prob});'
         yield f'  epm.set_error_starvation_cycles({starvation}ULL);'
+    elif spatial_model == 'sticky':
+        # Sticky hard-fault model (doc 10): Poisson births faults (reuses
+        # error_cycle_interval), access to a bad line = CE. Mode mix = FIT ratios;
+        # BANK fault covers a sparse subset of its bank at fault_density_bank.
+        w_cell = float(error_page_manager.get('fault_weight_cell', 18.6))
+        w_row = float(error_page_manager.get('fault_weight_row', 8.2))
+        w_bank = float(error_page_manager.get('fault_weight_bank', 10.0))
+        density = float(error_page_manager.get('fault_density_bank', 0.01))
+        seed = int(error_page_manager.get('error_seed', 54321))
+        if min(w_cell, w_row, w_bank) < 0 or (w_cell + w_row + w_bank) <= 0:
+            raise ValueError(f'error_page_manager fault weights must be non-negative with a positive sum, got {w_cell}/{w_row}/{w_bank}')
+        if not 0.0 < density <= 1.0:
+            raise ValueError(f'error_page_manager.fault_density_bank must be in (0, 1], got {density}')
+        yield '  epm.set_error_spatial_model(ErrorSpatialModel::STICKY);'
+        yield f'  epm.set_error_seed({seed}ULL);'
+        yield f'  epm.set_fault_mode_weights({w_cell}, {w_row}, {w_bank});'
+        yield f'  epm.set_fault_density_bank({density});'
     elif spatial_model != 'uniform':
-        raise ValueError(f'error_page_manager.error_spatial_model must be "uniform" or "clustered", got {spatial_model!r}')
+        raise ValueError(f'error_page_manager.error_spatial_model must be "uniform", "clustered", or "sticky", got {spatial_model!r}')
 
     # Location histograms in UNIFORM runs (opt-in; clustered prints them always)
     if error_page_manager.get('error_location_stats', False):

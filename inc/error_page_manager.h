@@ -44,6 +44,9 @@ enum class ErrorPageManagerMode {
 enum class ErrorSpatialModel {
     UNIFORM,
     CLUSTERED,
+    STICKY,     // access-driven CE at persistent fault regions, per-mode line
+                // density (doc 10). Poisson births faults; a bad line errors on
+                // every access. No Poisson CE budget, no starvation widening.
 };
 
 // DRAM fault granularity, following field-study fault taxonomies
@@ -162,6 +165,7 @@ private:
         uint64_t row{0};         // DRAM row within the bank (ROW mode match)
         uint64_t anchor_cl{0};   // cache-line address (CELL mode match)
         uint64_t manifest_count{0};
+        uint64_t salt{0};        // STICKY: per-fault hash basis for BANK line density
     };
     // One Poisson arrival waiting to be consumed by a matching read.
     // Starvation widens the match region in stages so a stalled manifestation
@@ -186,6 +190,9 @@ private:
     double fault_weight_bank{10.0};
     double fault_reuse_prob{0.7};
     uint64_t error_starvation_cycles{1000000};
+    // STICKY: fraction of a BANK fault's accessed lines that are physically bad
+    // (single-bank fault = scattered subset, NOT the whole bank). CELL/ROW = 1.0.
+    double fault_density_bank{0.01};
     std::mt19937_64 temporal_rng{54321};  // inter-arrival sampling (CLUSTERED)
     std::mt19937_64 spatial_rng{54321};   // fault creation/reuse sampling
     bool injection_initialized{false};
@@ -485,6 +492,10 @@ public:
             update_clustered_errors(current_cycle);
             return;
         }
+        if (spatial_model == ErrorSpatialModel::STICKY) {
+            update_sticky_faults(current_cycle);   // Poisson births faults (reuses error_cycle_interval)
+            return;
+        }
 
         // last_error_cycle is now used as "next_error_cycle"
         // If current cycle reaches the next scheduled error cycle, trigger error
@@ -511,6 +522,9 @@ public:
         if (spatial_model == ErrorSpatialModel::CLUSTERED) {
             return consume_clustered_error(get_cache_line_addr(pa), bank_key, row);
         }
+        if (spatial_model == ErrorSpatialModel::STICKY) {
+            return consume_sticky_error(get_cache_line_addr(pa), bank_key, row);
+        }
         if (pending_error_count > 0) {
             pending_error_count--;
             record_error_location(get_cache_line_addr(pa), bank_key, row);
@@ -532,6 +546,7 @@ public:
     }
     void set_fault_reuse_prob(double p) { fault_reuse_prob = p; }
     void set_error_starvation_cycles(uint64_t cycles) { error_starvation_cycles = cycles; }
+    void set_fault_density_bank(double d) { fault_density_bank = d; }
     // Prints the clustered-model section when active (no-op under UNIFORM,
     // keeping legacy output byte-identical). Safe to call from any stats path.
     void print_spatial_fault_stats() const;
@@ -582,6 +597,12 @@ private:
     void spawn_manifest(uint64_t fire_cycle);
     size_t select_fault_for_manifest();
     void on_page_retired_clustered(uint64_t page_base);
+    // STICKY model (doc 10): Poisson births faults; access to a bad line = CE.
+    void update_sticky_faults(uint64_t current_cycle);
+    void birth_fault();
+    bool consume_sticky_error(uint64_t cl_addr, uint64_t bank_key, uint64_t row);
+    bool is_bad_line(const FaultDomain& f, uint64_t cl_addr) const;
+    void print_sticky_stats() const;
     void record_error_location(uint64_t cl_addr, uint64_t bank_key, uint64_t row) {
         bank_manifest_hist[bank_key]++;
         row_manifest_hist[{bank_key, row}]++;
