@@ -360,21 +360,46 @@ void ErrorPageManager::update_sticky_faults(uint64_t current_cycle) {
 // branch: clustering comes from the fault being a fixed region, not resampling.
 void ErrorPageManager::birth_fault() {
     std::uniform_real_distribution<double> u(0.0, 1.0);
+
+    // Co-location (doc 11): with probability fault_colocate_prob, cluster this new
+    // fault into an existing (live) fault's region — inherit its chip (defects on
+    // one weak die correlate) and target its bank[, row-group]. The co-located
+    // fault is unanchored but will only anchor to a read INSIDE that target region
+    // (see consume_sticky_error), so it lands near its parent on real accesses.
+    // Its mode/salt are its own. Models defect spatial correlation; p=0 => current
+    // independent behavior (bit-identical).
+    bool colocate = fault_colocate_prob > 0.0 && !live_fault_indices.empty()
+                    && u(spatial_rng) < fault_colocate_prob;
+
     double total = fault_weight_cell + fault_weight_row + fault_weight_bank;
     double r = u(spatial_rng) * total;
     FaultMode fault_mode = (r < fault_weight_cell)                    ? FaultMode::CELL
                          : (r < fault_weight_cell + fault_weight_row) ? FaultMode::ROW
                                                                       : FaultMode::BANK;
     FaultDomain f{fault_mode};
-    std::uniform_int_distribution<int> chip_pick(0, CareEccCache::NUM_GLOBAL_COUNTERS - 1);
-    f.chip = static_cast<uint8_t>(chip_pick(spatial_rng));
-    f.salt = spatial_rng();   // per-fault hash basis for BANK line density
+
+    if (colocate) {
+        std::uniform_int_distribution<size_t> pick(0, live_fault_indices.size() - 1);
+        const FaultDomain& parent = faults[live_fault_indices[pick(spatial_rng)]];
+        f.chip = parent.chip;                        // inherit lane
+        f.colocated = true;
+        f.target_bank_key = parent.bank_key;
+        f.target_rowgroup = fault_colocate_scope_set ? (parent.row >> care_row_group_shift) : 0;
+        f.salt = spatial_rng();
+        stat_colocated_faults++;
+    } else {
+        std::uniform_int_distribution<int> chip_pick(0, CareEccCache::NUM_GLOBAL_COUNTERS - 1);
+        f.chip = static_cast<uint8_t>(chip_pick(spatial_rng));
+        f.salt = spatial_rng();   // per-fault hash basis for BANK line density
+    }
+
     faults.push_back(f);
     live_fault_indices.push_back(faults.size() - 1);
     stat_faults_created[static_cast<size_t>(fault_mode)]++;
     if (debug == 1) {
-        fmt::print("[FAULT] birth fault {} mode={} chip={}\n", faults.size() - 1,
-                   fault_mode == FaultMode::CELL ? "CELL" : fault_mode == FaultMode::ROW ? "ROW" : "BANK", f.chip);
+        fmt::print("[FAULT] birth fault {} mode={} chip={}{}\n", faults.size() - 1,
+                   fault_mode == FaultMode::CELL ? "CELL" : fault_mode == FaultMode::ROW ? "ROW" : "BANK", f.chip,
+                   colocate ? fmt::format(" colocated->bank_key=0x{:x}", f.target_bank_key) : "");
     }
 }
 
@@ -394,18 +419,24 @@ bool ErrorPageManager::consume_sticky_error(uint64_t cl_addr, uint64_t bank_key,
         return false;
     }
 
-    // (1) Anchor the oldest unanchored fault to this real access — a fault never
-    //     lands on memory the workload does not touch (working-set guarantee).
+    // (1) Anchor the first ELIGIBLE unanchored fault to this real access — a fault
+    //     never lands on memory the workload does not touch (working-set guarantee).
+    //     Fresh faults anchor to any read; co-located faults (doc 11) only anchor
+    //     to a read inside their target region (parent's bank[, row-group]) so they
+    //     land near their parent -> per-set/per-bank concentration on one chip.
     for (size_t idx : live_fault_indices) {
         FaultDomain& f = faults[idx];
-        if (!f.anchored) {
-            f.anchored = true;
-            f.bank_key = bank_key;
-            f.row = row;
-            f.anchor_cl = cl_addr;
-            stat_anchor_manifests++;
-            break;   // at most one anchor per access
+        if (f.anchored) continue;
+        if (f.colocated) {
+            if (bank_key != f.target_bank_key) continue;
+            if (fault_colocate_scope_set && (row >> care_row_group_shift) != f.target_rowgroup) continue;
         }
+        f.anchored = true;
+        f.bank_key = bank_key;
+        f.row = row;
+        f.anchor_cl = cl_addr;
+        stat_anchor_manifests++;
+        break;   // at most one anchor per access
     }
 
     // (2) Access hits a bad line of a live anchored fault -> hard fault -> CE.
@@ -448,6 +479,10 @@ void ErrorPageManager::print_sticky_stats() const {
     fmt::print("[ERROR]   BANK Line Density:              {:.4f}\n", fault_density_bank);
     fmt::print("[ERROR]   Faults Born:                    {} (cell={} row={} bank={})\n",
                total_faults, stat_faults_created[0], stat_faults_created[1], stat_faults_created[2]);
+    if (fault_colocate_prob > 0.0) {
+        fmt::print("[ERROR]   Co-located Faults:              {} (prob={:.2f}, scope={})\n",
+                   stat_colocated_faults, fault_colocate_prob, fault_colocate_scope_set ? "set" : "bank");
+    }
     fmt::print("[ERROR]   Faults Killed by Retirement:    {} (cell={} row={})\n",
                stat_faults_killed[0] + stat_faults_killed[1], stat_faults_killed[0], stat_faults_killed[1]);
     fmt::print("[ERROR]   Unanchored (waiting) at End:    {}\n", unanchored);

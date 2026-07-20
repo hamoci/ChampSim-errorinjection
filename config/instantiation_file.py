@@ -483,6 +483,16 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         yield f'  epm.set_error_seed({seed}ULL);'
         yield f'  epm.set_fault_mode_weights({w_cell}, {w_row}, {w_bank});'
         yield f'  epm.set_fault_density_bank({density});'
+        # Co-location (doc 11): defect spatial correlation. Emitted only when prob>0
+        # so p=0 configs keep byte-identical generated code.
+        colocate_prob = float(error_page_manager.get('fault_colocate_prob', 0.0))
+        colocate_scope = error_page_manager.get('fault_colocate_scope', 'bank')
+        if colocate_prob > 0.0:
+            if not 0.0 < colocate_prob < 1.0:
+                raise ValueError(f'error_page_manager.fault_colocate_prob must be in [0, 1), got {colocate_prob}')
+            if colocate_scope not in ('bank', 'set'):
+                raise ValueError(f'error_page_manager.fault_colocate_scope must be "bank" or "set", got {colocate_scope!r}')
+            yield f'  epm.set_fault_colocate({colocate_prob}, {"true" if colocate_scope == "set" else "false"});'
     elif spatial_model != 'uniform':
         raise ValueError(f'error_page_manager.error_spatial_model must be "uniform", "clustered", or "sticky", got {spatial_model!r}')
 

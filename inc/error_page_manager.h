@@ -166,6 +166,13 @@ private:
         uint64_t anchor_cl{0};   // cache-line address (CELL mode match)
         uint64_t manifest_count{0};
         uint64_t salt{0};        // STICKY: per-fault hash basis for BANK line density
+        // Co-location (doc 11): a co-located fault only anchors to a read inside
+        // its target region (parent's bank[, row-group]), inheriting the parent's
+        // chip -> models defect spatial correlation (multiple faults on one weak
+        // bank/set on one lane). target_rowgroup used only for "set" scope.
+        bool colocated{false};
+        uint64_t target_bank_key{0};
+        uint64_t target_rowgroup{0};
     };
     // One Poisson arrival waiting to be consumed by a matching read.
     // Starvation widens the match region in stages so a stalled manifestation
@@ -193,6 +200,11 @@ private:
     // STICKY: fraction of a BANK fault's accessed lines that are physically bad
     // (single-bank fault = scattered subset, NOT the whole bank). CELL/ROW = 1.0.
     double fault_density_bank{0.01};
+    // Co-location (doc 11): probability a new fault clusters into an existing
+    // fault's region (defect spatial correlation). 0 => independent (current).
+    // scope_set=false: same bank+chip; true: same bank+row-group+chip (per-set).
+    double fault_colocate_prob{0.0};
+    bool fault_colocate_scope_set{false};
     std::mt19937_64 temporal_rng{54321};  // inter-arrival sampling (CLUSTERED)
     std::mt19937_64 spatial_rng{54321};   // fault creation/reuse sampling
     bool injection_initialized{false};
@@ -208,6 +220,7 @@ private:
     uint64_t stat_faults_created[3]{0, 0, 0};   // indexed by FaultMode
     uint64_t stat_manifests[3]{0, 0, 0};        // indexed by FaultMode
     uint64_t stat_anchor_manifests{0};          // manifestations that anchored a fault
+    uint64_t stat_colocated_faults{0};          // faults born via co-location (doc 11)
     uint64_t stat_widened_bank{0};              // starvation: widened to fault's bank
     uint64_t stat_widened_any{0};               // starvation: widened to any read
     uint64_t stat_faults_killed[3]{0, 0, 0};    // faults dead via page retirement
@@ -547,6 +560,7 @@ public:
     void set_fault_reuse_prob(double p) { fault_reuse_prob = p; }
     void set_error_starvation_cycles(uint64_t cycles) { error_starvation_cycles = cycles; }
     void set_fault_density_bank(double d) { fault_density_bank = d; }
+    void set_fault_colocate(double prob, bool set_scope) { fault_colocate_prob = prob; fault_colocate_scope_set = set_scope; }
     // Prints the clustered-model section when active (no-op under UNIFORM,
     // keeping legacy output byte-identical). Safe to call from any stats path.
     void print_spatial_fault_stats() const;
