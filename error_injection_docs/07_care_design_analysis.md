@@ -58,7 +58,15 @@ region ∩ page = 각 page의 얇은 슬라이스이고, "region에 포함된 pa
 그대로의 의미론도 `care_proactive_victims: "region"` 모드로 구현**했다 (기본은
 `"observed"`): 할당된 page(current_ppage) 중 row-range가 트리거 set의 row-group과
 겹치는 것 전부를 retire. 두 모드는 `[CARE][PROACTIVE] mode=...` 로그로 구분되며,
-observed vs region victim 수의 실측 대비가 ablation 데이터가 된다.
+observed vs region victim 수의 실측 대비가 ablation 데이터가 된다 (demo 실측:
+동일 발화 지점에서 observed 389 vs region 667 pages).
+
+명세 주의 두 가지: ① region victim은 **할당(사용 중) page에 한정**된다 — 미사용
+주소공간은 후보가 아니며, "2GB" 추정치도 할당 page 기준. 관측(에러) page들은
+region 집합의 부분집합으로 함께 retire된다 (이미 영구 retire된 page는 스킵).
+② 실제 OS라면 region의 free frame도 비용 0으로 blacklist하겠지만, 시뮬레이터는
+메모리 압박(frame 고갈)을 모델링하지 않아 free frame 제거는 관측 효과가 없으므로
+생략 — 결과에 영향 없는 추상화.
 
 ## 2b. Global Counter = Device(lane) 단위 — 적대적 전문 재검증 (2026-07-19 확정)
 
