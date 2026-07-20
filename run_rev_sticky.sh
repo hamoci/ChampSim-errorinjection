@@ -11,11 +11,20 @@
 # ---------------------------------------------------------------------------
 cd "$(dirname "$0")" || exit 1
 
+# Optional args:
+#   $1 FILTER = binary glob to queue (default: all rev binaries)
+#   $2 TAG    = suffix for the queue/log files so multiple instances can co-run
+#               (each maintains TARGET total machine-wide, so together they still
+#                keep ~TARGET; use a distinct TAG to avoid clobbering jobs.txt).
+# e.g. ./run_rev_sticky.sh 'champsim_rev_*thr*_1e-7' 1e7
+FILTER="${1:-champsim_rev_*}"
+TAG="${2:-main}"
+
 TARGET=40                       # total champsim processes to maintain machine-wide
 WARMUP=50000000                 # 50M warmup
 SIM=250000000                   # 250M sim  (= 300M total, DPC-3 consistency)
 OUTROOT=results/multicore_rev
-LOG=$OUTROOT/scheduler.log
+LOG=$OUTROOT/scheduler_$TAG.log
 TR=test_traces
 
 # --- 7 representative mixes (4 traces each) --------------------------------
@@ -32,8 +41,8 @@ MIXES="C1 H1 M1 XS LL RA RC"
 mkdir -p "$OUTROOT/2_retirement_threshold" "$OUTROOT/6_llc_way_sweep"
 
 # --- build job queue from the built rev binaries --------------------------
-JOBS=$OUTROOT/jobs.txt; : > "$JOBS"
-for b in $(cd bin && ls champsim_rev_* 2>/dev/null); do
+JOBS=$OUTROOT/jobs_$TAG.txt; : > "$JOBS"
+for b in $(cd bin && ls $FILTER 2>/dev/null); do
   case "$b" in
     *_thr*) sub=2_retirement_threshold ;;
     *_mw*)  sub=6_llc_way_sweep ;;
