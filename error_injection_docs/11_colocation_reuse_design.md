@@ -24,32 +24,40 @@
 
 ## 2. 메커니즘 (결함 탄생 시점)
 
-`birth_fault()`를 다음과 같이 확장:
+`birth_fault()`를 다음과 같이 확장 (**실제 구현 기준** — 초안의 born-anchored에서 수정됨, §8 참조):
 ```
 birth_fault():
-  if (live 결함이 있음) and (spatial_rng: u < fault_colocate_prob):
+  if (ANCHORED live 결함이 있음) and (spatial_rng: u < fault_colocate_prob):
       # --- co-located 결함 ---
-      seed 결함 E = live 결함 중 균등 추첨
-      새 결함.chip     = E.chip                    # lane 상속 (같은 die가 약함)
-      새 결함.bank_key = E.bank_key                # 같은 bank
-      (scope == "set"이면)  새 결함.row = E.row    # 같은 row-group까지
-      새 결함.anchored = true                      # E의 영역은 이미 working set → 즉시 앵커
-      새 결함.mode     = FIT 추첨 (독립)           # 종류는 다양할 수 있음
-      새 결함.salt     = spatial_rng()             # 자기만의 고장 line 산포
+      seed 결함 E = ANCHORED live 결함 중 균등 추첨      # 미앵커 부모는 좌표(bank_key)가 없음 → 제외
+      새 결함.chip            = E.chip                  # lane 상속 (같은 die가 약함)
+      새 결함.target_bank_key = E.bank_key              # 같은 bank 조준
+      (scope=="set"이면) 새 결함.target_rowgroup = E.row_group  # 같은 row-group까지
+      새 결함.colocated = true                          # 미앵커 유지 — 아래 (2) 참조
+      새 결함.mode     = FIT 추첨 (독립)                # 종류는 다양할 수 있음
+      새 결함.salt     = spatial_rng()                  # 자기만의 고장 line 산포
+      # 앵커는 consume 시점: target 영역(bank[+row-group])으로 오는 첫 read에만 → 그 read의 실제 line 취함
   else:
-      # --- fresh 결함 (현재 sticky 그대로) ---
+      # --- fresh 결함 (독립 sticky) ---
       mode/chip/salt 랜덤, 미앵커 (다음 read에 앵커)
 ```
 
 **핵심 설계 선택:**
 1. **chip은 반드시 상속** — lane 일관성이 CARE bias의 전제. (다른 chip이면 은퇴가
    다른 counter로 가서 bias가 안 생김.)
-2. **born-anchored** — E의 영역(bank/row)은 E가 이미 앵커된 곳 = 워크로드가 실제
-   접근하는 자리이므로, co-located 결함은 **read를 기다릴 필요 없이 즉시 E의 좌표를
-   복사**해 앵커 완료 (starvation 없음).
-3. **mode는 독립 추첨** — 한 bank에 cell/row/bank 결함이 섞여 있는 게 현실적. (chip과
+2. **born-unanchored + 영역 게이트** (초안의 born-anchored에서 변경) — born-anchored는
+   CELL 결함에 구체 line이 필요한 문제(§8)가 있어, 구현은 co-located 결함을 **미앵커로
+   두고 target 영역으로 오는 첫 read에 앵커**한다. 그 read의 실제 line을 취하므로
+   CELL/ROW/BANK 전부 구체 좌표를 얻음.
+   - **트레이드오프: starvation 가능** — target 영역이 다시 안 읽히면 미앵커로 남아 CE를
+     안 냄. 단 실측상 무시할 수준(p9 테스트 unanchored 0(bank)/24(set)), 굶는 건 "접근
+     안 되는 영역의 결함"뿐이라 물리적으로도 맞음.
+3. **부모는 ANCHORED 결함만 추첨** — 미앵커 부모는 `bank_key=0`이라 상속하면 bank 0로
+   잘못 집중(spurious). anchored 부모는 target 영역이 실제 접근된 곳임을 보장 → starvation도
+   완화. (앵커된 결함이 아직 없으면 fresh 결함으로 fallback.)
+4. **mode는 독립 추첨** — 한 bank에 cell/row/bank 결함이 섞여 있는 게 현실적. (chip과
    위치만 상속, 종류는 다양.)
-4. **salt는 독립** — co-located BANK 결함은 같은 bank지만 **자기만의 고장 line 산포**를
+5. **salt는 독립** — co-located BANK 결함은 같은 bank지만 **자기만의 고장 line 산포**를
    가짐 (E와 겹치는 line은 union으로 고장, 물리적으로 자연스러움).
 
 ## 3. Scope (집중 강도) — config로 선택

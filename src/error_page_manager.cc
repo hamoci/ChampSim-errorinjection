@@ -362,7 +362,7 @@ void ErrorPageManager::birth_fault() {
     std::uniform_real_distribution<double> u(0.0, 1.0);
 
     // Co-location (doc 11): with probability fault_colocate_prob, cluster this new
-    // fault into an existing (live) fault's region — inherit its chip (defects on
+    // fault into an existing ANCHORED fault's region — inherit its chip (defects on
     // one weak die correlate) and target its bank[, row-group]. The co-located
     // fault is unanchored but will only anchor to a read INSIDE that target region
     // (see consume_sticky_error), so it lands near its parent on real accesses.
@@ -379,15 +379,30 @@ void ErrorPageManager::birth_fault() {
     FaultDomain f{fault_mode};
 
     if (colocate) {
-        std::uniform_int_distribution<size_t> pick(0, live_fault_indices.size() - 1);
-        const FaultDomain& parent = faults[live_fault_indices[pick(spatial_rng)]];
-        f.chip = parent.chip;                        // inherit lane
-        f.colocated = true;
-        f.target_bank_key = parent.bank_key;
-        f.target_rowgroup = fault_colocate_scope_set ? (parent.row >> care_row_group_shift) : 0;
-        f.salt = spatial_rng();
-        stat_colocated_faults++;
-    } else {
+        // Pick the parent only among ANCHORED live faults. An unanchored parent
+        // has no coordinates yet (bank_key defaults to 0), so inheriting from it
+        // would target bank 0 instead of the parent's real region (a spurious
+        // concentration artifact). Requiring an anchored parent also guarantees
+        // the target region was actually accessed, which reduces co-located
+        // starvation. If nothing is anchored yet, fall back to an independent fault.
+        std::vector<size_t> anchored_parents;
+        anchored_parents.reserve(live_fault_indices.size());
+        for (size_t idx : live_fault_indices)
+            if (faults[idx].anchored) anchored_parents.push_back(idx);
+        if (!anchored_parents.empty()) {
+            std::uniform_int_distribution<size_t> pick(0, anchored_parents.size() - 1);
+            const FaultDomain& parent = faults[anchored_parents[pick(spatial_rng)]];
+            f.chip = parent.chip;                        // inherit lane
+            f.colocated = true;
+            f.target_bank_key = parent.bank_key;
+            f.target_rowgroup = fault_colocate_scope_set ? (parent.row >> care_row_group_shift) : 0;
+            f.salt = spatial_rng();
+            stat_colocated_faults++;
+        } else {
+            colocate = false;   // no anchored parent yet -> independent fault
+        }
+    }
+    if (!colocate) {
         std::uniform_int_distribution<int> chip_pick(0, CareEccCache::NUM_GLOBAL_COUNTERS - 1);
         f.chip = static_cast<uint8_t>(chip_pick(spatial_rng));
         f.salt = spatial_rng();   // per-fault hash basis for BANK line density
