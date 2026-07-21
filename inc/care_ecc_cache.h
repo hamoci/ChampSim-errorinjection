@@ -11,6 +11,9 @@
  *       S1 --write--> S2 (hard-error confirming)
  *       S2 --read---> S3 (hard error: every read of a faulty block re-detects)
  *       S3 --read---> retire signal (caller retires the containing page)
+ *     With retire_on_confirm, the S2 read raises the retire signal at S3
+ *     entry; S3 becomes transient (never resident across calls, so the
+ *     Pseudocode 1 S3-blocking branch never binds). See deviations below.
  *   - Replacement follows paper Pseudocode 1. With single-error registration
  *     (new block err_count == 1) and resident err_count >= 1, it degenerates
  *     to "insert only into a free way" — fixed by unit test.
@@ -38,8 +41,29 @@
  *     resets the set's counters for the next accounting round.
  *
  * Remaining deliberate deviations:
+ *   - retire_on_confirm (mimic mode, default off): the S2->S3 confirming read
+ *     raises the retire signal immediately instead of waiting for one more S3
+ *     read. Rationale: confirmation is complete at S3 entry by the paper's own
+ *     text (Fig. 3 labels S3 "Ready for Page Retirement"; p.537 "the data
+ *     block is confirmed to contain hard errors"); the subsequent read is a
+ *     trigger of convenience ("we CHOOSE to retire ... when the data block
+ *     sees another read access"), not evidence. That extra read is access-
+ *     dependent — a limitation the paper itself reports (p.541: unaccessed
+ *     regions "get corrupted silently"; scrubbing is suggested only as a
+ *     complementary remedy, not modeled) — and under accelerated injection it
+ *     starves the pipeline (observed: 98% drops, S3 squatters freeze their
+ *     sets via Pseudocode 1 branch 1, proactive never fires). Retiring at
+ *     confirmation approximates the prompt-observation abstraction under
+ *     which the paper's reliability claims are produced (FaultSim track,
+ *     Fig. 6) and matches its responsive-retirement intent (IV.B.2). The
+ *     evidence chain (register -> repair write -> re-detect) is untouched.
  *   - Single per-entry error counter instead of 8x2-bit column counters
  *     (per-retirement global-counter contribution capped at 3 to compensate).
+ *     In retire_on_confirm mode the contribution is fixed AT the cap: the
+ *     compressed pipeline gives a retiring block exactly 2 observations
+ *     (register + confirming read) where the paper's flow accumulates >= 3,
+ *     so min(err_count, 3) would silently change the paper's trigger
+ *     arithmetic (15/3 = 5 same-chip retirements per proactive) to 15/2 = 8.
  *   - Random tie-break of Pseudocode 1 replaced by lowest-index pick for
  *     determinism (branch unreachable under the degenerate replacement above).
  *   - Transient errors unmodeled (hard-only): no S2 -> S0 soft-repair path.
@@ -103,8 +127,10 @@ public:
 
   // or_trigger relaxes the paper's trigger (saturation AND bias) to
   // saturation OR bias — exploratory only, not the paper's condition.
+  // retire_on_confirm collapses S3 into the confirming read (mimic mode,
+  // header rationale above).
   CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled = false,
-               bool or_trigger = false);
+               bool or_trigger = false, bool retire_on_confirm = false);
 
   // Every DRAM read of this 64B-aligned line (first service only).
   // set = caller-composed paper index (channel|rank/bank fold|row MSBs).
@@ -166,6 +192,7 @@ private:
   std::size_t ways_;
   bool proactive_enabled_;
   bool or_trigger_;
+  bool retire_on_confirm_;
   std::vector<Entry> entries_; // sets_ x ways_, row-major
   std::vector<std::array<uint8_t, NUM_GLOBAL_COUNTERS>> gcounters_; // per set
   // Pages with observed errors per set (proactive victim evidence). Bounded

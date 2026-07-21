@@ -637,7 +637,7 @@ void ErrorPageManager::init_care_cache() {
         fmt::print("[ERROR_PAGE_MANAGER] FATAL: CARE DRAM geometry not initialized (set_care_dram_geometry must run before init_care_cache)\n");
         std::abort();
     }
-    care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways, care_proactive, care_proactive_or);
+    care_cache = std::make_unique<CareEccCache>(care_ecc_sets, care_ecc_ways, care_proactive, care_proactive_or, care_retire_on_confirm);
 }
 
 void ErrorPageManager::set_care_dram_geometry(uint64_t channels, uint64_t banks_per_channel, uint64_t rows,

@@ -4,9 +4,9 @@
 #include <cassert>
 #include <iterator>
 
-CareEccCache::CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled, bool or_trigger)
-    : sets_(num_sets), ways_(num_ways), proactive_enabled_(proactive_enabled), or_trigger_(or_trigger), entries_(num_sets * num_ways),
-      gcounters_(num_sets), observed_pages_(num_sets)
+CareEccCache::CareEccCache(std::size_t num_sets, std::size_t num_ways, bool proactive_enabled, bool or_trigger, bool retire_on_confirm)
+    : sets_(num_sets), ways_(num_ways), proactive_enabled_(proactive_enabled), or_trigger_(or_trigger), retire_on_confirm_(retire_on_confirm),
+      entries_(num_sets * num_ways), gcounters_(num_sets), observed_pages_(num_sets)
 {
   assert(sets_ > 0 && (sets_ & (sets_ - 1)) == 0); // power of two (paper 10-bit index layout)
   assert(ways_ > 0);
@@ -46,6 +46,17 @@ CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr, std::size_t 
     e->state = State::S3;
     out.promoted_s3 = true;
     stats_.reads_s2_to_s3++;
+    if (retire_on_confirm_) {
+      // Mimic mode: confirmation IS the retirement trigger (header rationale).
+      // Same signal path as the S3 branch below; the caller's invalidate_page
+      // removes the entry before it is ever resident in S3.
+      out.retire = true;
+      out.entry_chip = e->chip_idx;
+      out.entry_err_count = e->err_count;
+      stats_.retires++;
+      if (proactive_enabled_)
+        account_retirement(set, *e, out);
+    }
     break;
   case State::S3:
     out.retire = true; // caller retires the page, then invalidate_page() drops this entry
@@ -67,7 +78,12 @@ CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr, std::size_t 
 void CareEccCache::account_retirement(std::size_t set, const Entry& e, ReadOutcome& out)
 {
   auto& gc = gcounters_[set];
-  uint32_t contrib = std::min(e.err_count, LOCAL_CONTRIB_CAP);
+  // retire_on_confirm: the compressed pipeline observes a retiring block
+  // exactly twice (register + confirming read); the paper's flow reaches
+  // retirement with >= 3 local-counter increments. Contribute the full 2-bit
+  // cap so the paper's trigger arithmetic (15/3 = 5 same-chip retirements
+  // per proactive) is preserved instead of silently becoming 15/2 = 8.
+  uint32_t contrib = retire_on_confirm_ ? LOCAL_CONTRIB_CAP : std::min(e.err_count, LOCAL_CONTRIB_CAP);
   gc[e.chip_idx] = static_cast<uint8_t>(std::min<uint32_t>(GLOBAL_COUNTER_MAX, gc[e.chip_idx] + contrib));
   stats_.gc_accumulations++;
 

@@ -318,3 +318,66 @@ TEST_CASE("Proactive AND default: bias at 12 without saturation does not trigger
   }
   REQUIRE(ecc.global_counter(0, 0) == 12); // biased but not saturated: no trigger, no reset
 }
+
+TEST_CASE("Retire-on-confirmation mimic: the confirming read retires immediately")
+{
+  CareEccCache ecc{4, 2, /*proactive_enabled=*/false, /*or_trigger=*/false, /*retire_on_confirm=*/true};
+  const uint64_t line = line_tag(120);
+  const std::size_t set = 0;
+
+  REQUIRE(ecc.on_error(line, set) == CareEccCache::RegisterOutcome::REGISTERED);
+  REQUIRE(ecc.on_write(line, set)); // S1 -> S2 (demand-scrub correction writeback)
+
+  auto rd = ecc.on_read(line, set); // confirmation IS the retirement trigger
+  REQUIRE(rd.tracked);
+  REQUIRE(rd.promoted_s3);
+  REQUIRE(rd.retire);
+  REQUIRE(rd.entry_err_count == 2); // register + confirming read
+  REQUIRE(ecc.stats().reads_s2_to_s3 == 1);
+  REQUIRE(ecc.stats().retires == 1);
+}
+
+TEST_CASE("Retire-on-confirmation mimic: no S3 squatter, the freed way accepts the next block")
+{
+  // 1-way set: in faithful mode a resident S3 entry would freeze the set
+  // (Pseudocode 1 branch 1) until a further read arrives. In mimic mode the
+  // entry retires at confirmation and the caller's invalidate_page frees the
+  // way for the next registration.
+  CareEccCache ecc{4, 1, false, false, /*retire_on_confirm=*/true};
+  const std::size_t set = 0;
+
+  REQUIRE(ecc.on_error(line_tag(130), set) == CareEccCache::RegisterOutcome::REGISTERED);
+  REQUIRE(ecc.on_write(line_tag(130), set));
+  REQUIRE(ecc.on_read(line_tag(130), set).retire);
+  ecc.invalidate_page(line_tag(130) & CareEccCache::PAGE_BASE_MASK);
+
+  REQUIRE(ecc.occupancy() == 0);
+  REQUIRE(ecc.on_error(line_tag(131), set) == CareEccCache::RegisterOutcome::REGISTERED);
+}
+
+TEST_CASE("Retire-on-confirmation mimic: full-cap contribution keeps the paper's five-retirement proactive arithmetic")
+{
+  CareEccCache ecc{1, 8, /*proactive_enabled=*/true, /*or_trigger=*/false, /*retire_on_confirm=*/true};
+
+  auto confirm_retire = [&](uint64_t line) {
+    REQUIRE(ecc.on_error(line, 0, /*chip=*/0) == CareEccCache::RegisterOutcome::REGISTERED);
+    REQUIRE(ecc.on_write(line, 0));
+    auto out = ecc.on_read(line, 0);
+    REQUIRE(out.retire);
+    return out;
+  };
+
+  for (int i = 0; i < 4; ++i) {
+    auto out = confirm_retire(line_tag(140 + i));
+    REQUIRE_FALSE(out.proactive); // 3*(i+1) <= 12 < 15
+    ecc.invalidate_page(line_tag(140 + i) & CareEccCache::PAGE_BASE_MASK);
+  }
+  // err_count at retirement is 2, but the contribution is fixed at the cap (3).
+  REQUIRE(ecc.global_counter(0, 0) == 12);
+
+  auto out = confirm_retire(line_tag(144));
+  REQUIRE(out.proactive); // 5 x 3 = 15 saturates; bias 15 >= 12 (paper arithmetic)
+  REQUIRE(out.biased_chip == 0);
+  REQUIRE(ecc.stats().proactive_triggers == 1);
+  REQUIRE(ecc.global_counter(0, 0) == 0); // round closed
+}

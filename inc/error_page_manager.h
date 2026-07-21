@@ -265,6 +265,10 @@ private:
     // false: the paper's literal AND condition, which needs ~5 same-chip
     // retirements landing in one set and never fired in full-scale probes.
     bool care_proactive_or{true};
+    // Retire at S2->S3 confirmation instead of the next S3 read (mimic mode,
+    // rationale in care_ecc_cache.h). Default ON: without it the accelerated-
+    // injection pipeline starves (observed 98% drops, proactive never fires).
+    bool care_retire_on_confirm{true};
     uint32_t care_bch_decode_cycles{30};  // for stat printing; latency below is authoritative
     champsim::chrono::clock::duration care_bch_decode_latency{};
     size_t care_ecc_sets{1024};
@@ -465,6 +469,8 @@ public:
     bool is_care_proactive() const { return care_proactive; }
     void set_care_proactive_or(bool enabled) { care_proactive_or = enabled; }
     bool is_care_proactive_or() const { return care_proactive_or; }
+    void set_care_retire_on_confirm(bool enabled) { care_retire_on_confirm = enabled; }
+    bool is_care_retire_on_confirm() const { return care_retire_on_confirm; }
     size_t get_care_ecc_sets() const { return care_ecc_sets; }
     size_t get_care_ecc_ways() const { return care_ecc_ways; }
 

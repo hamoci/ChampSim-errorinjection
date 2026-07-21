@@ -595,6 +595,10 @@ void MEMORY_CONTROLLER::initialize()
     if (epm.is_care_demand_scrub()) {
       fmt::print("[ERROR_PAGE_MANAGER] CARE demand scrubbing: ON (registration auto-confirms S1->S2)\n");
     }
+    if (epm.is_care_retire_on_confirm()) {
+      fmt::print("[ERROR_PAGE_MANAGER] CARE retire-on-confirm mimic: ON (S2->S3 confirming read retires; gc contribution fixed at {})\n",
+                 CareEccCache::LOCAL_CONTRIB_CAP);
+    }
     if (epm.is_care_proactive()) {
       fmt::print("[ERROR_PAGE_MANAGER] CARE proactive retirement: ON (8x4-bit global counters/set, saturate {} + bias >= {})\n",
                  CareEccCache::GLOBAL_COUNTER_MAX, CareEccCache::PROACTIVE_BIAS_MIN);
