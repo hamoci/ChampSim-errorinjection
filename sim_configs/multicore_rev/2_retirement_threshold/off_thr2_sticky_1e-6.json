@@ -171,18 +171,19 @@
     "data_page_fault_2mb": 109201,
     "randomization": 1
   },
-  "executable_name": "champsim_rev_pin_thr16_1e-8",
+  "executable_name": "champsim_rev_off_thr2_1e-6",
   "error_page_manager": {
     "mode": "CYCLE",
-    "cache_pinning": true,
-    "dynamic_error_latency": true,
+    "cache_pinning": false,
+    "dynamic_error_latency": false,
     "error_latency_penalty": 454568,
-    "retirement_threshold": 16,
+    "retirement_threshold": 32,
     "max_error_ways_per_set": 8,
     "debug": 0,
-    "error_cycle_interval": 144000,
+    "error_cycle_interval": 14400000,
     "error_spatial_model": "sticky",
     "error_seed": 54321,
+    "baseline_retirement_threshold": 2,
     "fault_density_bank": 0.05
   }
 }

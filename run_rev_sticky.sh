@@ -20,7 +20,7 @@ cd "$(dirname "$0")" || exit 1
 FILTER="${1:-champsim_rev_*}"
 TAG="${2:-main}"
 
-TARGET=40                       # total champsim processes to maintain machine-wide
+TARGET="${TARGET:-40}"          # total champsim processes to maintain machine-wide (env-overridable)
 WARMUP=50000000                 # 50M warmup
 SIM=250000000                   # 250M sim  (= 300M total, DPC-3 consistency)
 OUTROOT=results/multicore_rev

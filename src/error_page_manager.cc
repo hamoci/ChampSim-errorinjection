@@ -257,6 +257,14 @@ void ErrorPageManager::on_page_retired_clustered(uint64_t page_base) {
                 fmt::print("[FAULT] fault {} ({}) killed by retirement of page 0x{:x}\n",
                            *it, f.mode == FaultMode::CELL ? "CELL" : "ROW", page_base);
             }
+            if (spatial_model == ErrorSpatialModel::STICKY) {   // keep the anchored bucket in sync
+                auto bucket_it = sticky_anchored_by_bank.find(f.bank_key);
+                if (bucket_it != sticky_anchored_by_bank.end()) {
+                    auto& bucket = bucket_it->second;
+                    auto p = std::lower_bound(bucket.begin(), bucket.end(), *it);
+                    if (p != bucket.end() && *p == *it) bucket.erase(p);
+                }
+            }
             it = live_fault_indices.erase(it);
         } else {
             ++it;
@@ -410,6 +418,7 @@ void ErrorPageManager::birth_fault() {
 
     faults.push_back(f);
     live_fault_indices.push_back(faults.size() - 1);
+    sticky_unanchored.push_back(faults.size() - 1);   // new fault is unanchored (birth order preserved)
     stat_faults_created[static_cast<size_t>(fault_mode)]++;
     if (debug == 1) {
         fmt::print("[FAULT] birth fault {} mode={} chip={}{}\n", faults.size() - 1,
@@ -439,9 +448,9 @@ bool ErrorPageManager::consume_sticky_error(uint64_t cl_addr, uint64_t bank_key,
     //     Fresh faults anchor to any read; co-located faults (doc 11) only anchor
     //     to a read inside their target region (parent's bank[, row-group]) so they
     //     land near their parent -> per-set/per-bank concentration on one chip.
-    for (size_t idx : live_fault_indices) {
-        FaultDomain& f = faults[idx];
-        if (f.anchored) continue;
+    for (auto uit = sticky_unanchored.begin(); uit != sticky_unanchored.end(); ++uit) {
+        size_t idx = *uit;
+        FaultDomain& f = faults[idx];   // every entry here is live and unanchored by construction
         if (f.colocated) {
             if (bank_key != f.target_bank_key) continue;
             if (fault_colocate_scope_set && (row >> care_row_group_shift) != f.target_rowgroup) continue;
@@ -451,29 +460,35 @@ bool ErrorPageManager::consume_sticky_error(uint64_t cl_addr, uint64_t bank_key,
         f.row = row;
         f.anchor_cl = cl_addr;
         stat_anchor_manifests++;
+        sticky_unanchored.erase(uit);   // leaves the unanchored pool (order of the rest preserved)
+        // enter the bank bucket, kept ascending by fault index (== birth order == full-scan order)
+        auto& bucket = sticky_anchored_by_bank[bank_key];
+        bucket.insert(std::upper_bound(bucket.begin(), bucket.end(), idx), idx);
         break;   // at most one anchor per access
     }
 
     // (2) Access hits a bad line of a live anchored fault -> hard fault -> CE.
     //     First matching fault wins (any owning fault is physically valid).
-    for (size_t idx : live_fault_indices) {
-        FaultDomain& f = faults[idx];
-        if (!f.anchored) continue;
-        bool in_region =
-            (f.mode == FaultMode::CELL) ? (cl_addr == f.anchor_cl)
-          : (f.mode == FaultMode::ROW)  ? (bank_key == f.bank_key && row == f.row)
-                                        : (bank_key == f.bank_key);   // BANK
-        if (in_region && is_bad_line(f, cl_addr)) {
-            f.manifest_count++;
-            stat_manifests[static_cast<size_t>(f.mode)]++;
-            last_consumed_chip = f.chip;
-            record_error_location(cl_addr, bank_key, row);
-            if (debug == 1) {
-                fmt::print("[FAULT] sticky CE fault {} mode={} cl=0x{:x} bank_key=0x{:x} row={}\n", idx,
-                           f.mode == FaultMode::CELL ? "CELL" : f.mode == FaultMode::ROW ? "ROW" : "BANK",
-                           cl_addr, bank_key, row);
+    auto bucket_it = sticky_anchored_by_bank.find(bank_key);
+    if (bucket_it != sticky_anchored_by_bank.end()) {
+        for (size_t idx : bucket_it->second) {   // ascending fault index == birth order == full-scan order
+            FaultDomain& f = faults[idx];        // every entry here is anchored with f.bank_key == bank_key
+            bool in_region =
+                (f.mode == FaultMode::CELL) ? (cl_addr == f.anchor_cl)
+              : (f.mode == FaultMode::ROW)  ? (bank_key == f.bank_key && row == f.row)
+                                            : (bank_key == f.bank_key);   // BANK
+            if (in_region && is_bad_line(f, cl_addr)) {
+                f.manifest_count++;
+                stat_manifests[static_cast<size_t>(f.mode)]++;
+                last_consumed_chip = f.chip;
+                record_error_location(cl_addr, bank_key, row);
+                if (debug == 1) {
+                    fmt::print("[FAULT] sticky CE fault {} mode={} cl=0x{:x} bank_key=0x{:x} row={}\n", idx,
+                               f.mode == FaultMode::CELL ? "CELL" : f.mode == FaultMode::ROW ? "ROW" : "BANK",
+                               cl_addr, bank_key, row);
+                }
+                return true;
             }
-            return true;
         }
     }
     return false;
