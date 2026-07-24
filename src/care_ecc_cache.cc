@@ -55,7 +55,7 @@ CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr, std::size_t 
       out.entry_err_count = e->err_count;
       stats_.retires++;
       if (proactive_enabled_)
-        account_retirement(set, *e, out);
+        account_retirement(set, e->chip_idx, retire_contrib(e->err_count), out);
     }
     break;
   case State::S3:
@@ -64,7 +64,7 @@ CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr, std::size_t 
     out.entry_err_count = e->err_count;
     stats_.retires++;
     if (proactive_enabled_)
-      account_retirement(set, *e, out);
+      account_retirement(set, e->chip_idx, retire_contrib(e->err_count), out);
     break;
   }
   return out;
@@ -75,16 +75,10 @@ CareEccCache::ReadOutcome CareEccCache::on_read(uint64_t line_addr, std::size_t 
 // saturates, a max-min bias >= 12 means the confirmed hard errors concentrate
 // on one bank/chip -> proactive retirement of everything the set protects.
 // Saturation without bias closes the accounting round (counters reset).
-void CareEccCache::account_retirement(std::size_t set, const Entry& e, ReadOutcome& out)
+void CareEccCache::account_retirement(std::size_t set, uint8_t chip_idx, uint32_t contrib, ReadOutcome& out)
 {
   auto& gc = gcounters_[set];
-  // retire_on_confirm: the compressed pipeline observes a retiring block
-  // exactly twice (register + confirming read); the paper's flow reaches
-  // retirement with >= 3 local-counter increments. Contribute the full 2-bit
-  // cap so the paper's trigger arithmetic (15/3 = 5 same-chip retirements
-  // per proactive) is preserved instead of silently becoming 15/2 = 8.
-  uint32_t contrib = retire_on_confirm_ ? LOCAL_CONTRIB_CAP : std::min(e.err_count, LOCAL_CONTRIB_CAP);
-  gc[e.chip_idx] = static_cast<uint8_t>(std::min<uint32_t>(GLOBAL_COUNTER_MAX, gc[e.chip_idx] + contrib));
+  gc[chip_idx] = static_cast<uint8_t>(std::min<uint32_t>(GLOBAL_COUNTER_MAX, gc[chip_idx] + contrib));
   stats_.gc_accumulations++;
 
   auto [min_it, max_it] = std::minmax_element(gc.begin(), gc.end());
@@ -222,6 +216,22 @@ CareEccCache::RegisterOutcome CareEccCache::on_error(uint64_t line_addr, std::si
   *slot = Entry{line_addr, 1, State::S1, true, static_cast<uint8_t>(chip % NUM_GLOBAL_COUNTERS)};
   stats_.registered++;
   return RegisterOutcome::REGISTERED;
+}
+
+// Contention-free confirmation (header rationale): repeat CE on an untracked
+// line = post-scrub recurrence = confirmed hard. Same retire signal and
+// global-counter arithmetic as a tracked S3 retirement; the entry never
+// existed, so err_count reports the two observations that confirmed it.
+CareEccCache::ReadOutcome CareEccCache::confirm_untracked(std::size_t set, uint8_t chip)
+{
+  ReadOutcome out{};
+  out.retire = true;
+  out.entry_chip = static_cast<uint8_t>(chip % NUM_GLOBAL_COUNTERS);
+  out.entry_err_count = 2; // register CE + confirming repeat CE
+  stats_.retires_celog++;
+  if (proactive_enabled_)
+    account_retirement(set, out.entry_chip, LOCAL_CONTRIB_CAP, out);
+  return out;
 }
 
 std::size_t CareEccCache::invalidate_page(uint64_t page_base)

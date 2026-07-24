@@ -84,7 +84,8 @@ struct PerCpuErrorStats {
     uint64_t baseline_retirements{0}; // retirements triggered via baseline path (pinning OFF)
     uint64_t care_registered{0};      // CARE: new ECC cache registrations (scheme == care)
     uint64_t care_dropped{0};         // CARE: errors refused by full ECC cache set
-    uint64_t care_retirements{0};     // CARE: page retirements triggered by S3 reads
+    uint64_t care_retirements{0};     // CARE: page retirements (both confirm paths)
+    uint64_t care_celog_retirements{0}; // CARE: subset confirmed via MC CE log (untracked repeat CE)
 };
 
 class ErrorPageManager {
@@ -269,6 +270,16 @@ private:
     // rationale in care_ecc_cache.h). Default ON: without it the accelerated-
     // injection pipeline starves (observed 98% drops, proactive never fires).
     bool care_retire_on_confirm{true};
+    // Contention-free confirmation ("celog", rationale in care_ecc_cache.h):
+    // a repeat CE on an UNTRACKED line retires its page — same rewrite-then-
+    // recur evidence as the tracked path, kept observable where accelerated
+    // injection saturates the 2-way sets. Inside the paper's evaluated
+    // regime (contention ~0) this is behaviorally identical to residency-
+    // based confirmation. Active only together with care_demand_scrub (the
+    // corrective write that makes the second CE "post-rewrite" evidence is
+    // admission-independent scrubbing). Default ON; JSON
+    // care_celog_confirm=false restores admission-gated behavior.
+    bool care_celog_confirm{true};
     uint32_t care_bch_decode_cycles{30};  // for stat printing; latency below is authoritative
     champsim::chrono::clock::duration care_bch_decode_latency{};
     size_t care_ecc_sets{1024};
@@ -476,6 +487,8 @@ public:
     bool is_care_proactive_or() const { return care_proactive_or; }
     void set_care_retire_on_confirm(bool enabled) { care_retire_on_confirm = enabled; }
     bool is_care_retire_on_confirm() const { return care_retire_on_confirm; }
+    void set_care_celog_confirm(bool enabled) { care_celog_confirm = enabled; }
+    bool is_care_celog_confirm() const { return care_celog_confirm; }
     size_t get_care_ecc_sets() const { return care_ecc_sets; }
     size_t get_care_ecc_ways() const { return care_ecc_ways; }
 
@@ -501,9 +514,13 @@ public:
     uint64_t get_last_proactive_victims() const { return last_proactive_victims; }
     // Every DRAM write (first service): S1→S2 confirmation.
     void care_on_write(uint64_t pa, uint64_t bank_key, uint64_t row);
-    // Injected error consumed by a read packet: registration attempt (no latency).
-    // Chip comes from the consumed fault (clustered) or an address hash (uniform).
-    void care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row);
+    // Injected error consumed by a read packet: registration attempt, or —
+    // celog-confirm path — retirement of a repeat-CE untracked line. Returns
+    // true when the CE-log path retired the page on this read; the caller
+    // (service_packet) then charges the page-offline latency exactly like the
+    // tracked-confirm path. Chip comes from the consumed fault (clustered) or
+    // an address hash (uniform).
+    bool care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row);
 
     uint64_t get_stat_care_retirement_count() const { return stat_care_retirement_count; }
     void print_care_stats() const;
@@ -614,6 +631,14 @@ public:
     void print_error_pages() const;
 
 private:
+    // Shared retirement executor for both CARE confirmation paths (tracked
+    // S2->S3 read and untracked MC CE-log repeat): proactive victim
+    // collection, ECC invalidation, page offline, stats/logs, and the
+    // last_proactive_victims handoff. `out` carries the proactive decision
+    // already made by the cache-side accumulation; `src` tags the event log.
+    void care_execute_retirement(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row,
+                                 size_t set, const CareEccCache::ReadOutcome& out, const char* src);
+
     // CARE region-victim internals (error_page_manager.cc)
     uint64_t care_row_of_pa(uint64_t pa) const {
         return (pa >> care_row_bit_offset) & (care_row_count - 1);

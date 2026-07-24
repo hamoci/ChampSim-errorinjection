@@ -41,6 +41,30 @@
  *     resets the set's counters for the next accounting round.
  *
  * Remaining deliberate deviations:
+ *   - contention-free confirmation ("celog" paths, driven by
+ *     ErrorPageManager): a repeat CE on an UNTRACKED line confirms hard and
+ *     retires without ECC cache admission. Rationale: every CE's address and
+ *     syndrome already passes through the MC in CARE's own design (Fig. 5
+ *     read path); what the 2-way set bounds is RETENTION, and the paper
+ *     sizes that retention to its p_b design point (5e-13..5e-10, Fig. 4a).
+ *     Both of the paper's evaluation tracks run where set contention is ~0 —
+ *     FaultSim at field FIT rates, and gem5 with one-week/one-year FIT error
+ *     maps (IV.A.3, a handful of faults) — so the drop path effectively
+ *     never executes in the paper's own evaluation. Under our accelerated
+ *     injection (p_b ~6-9 orders above design point) it dominates: 94-99%
+ *     drops, retirement starved, proactive never fed. This mimic therefore
+ *     models the CONFIRMATION pipeline at the contention-free point the
+ *     paper's evaluation assumes (same abstraction family as
+ *     retire_on_confirm below), while PROTECTION (BCH attachment and its
+ *     decode latency) stays bounded by the paper's real 1024x2 hardware.
+ *     With demand scrubbing the corrective write after the first CE is
+ *     admission-independent, so the repeat CE is a post-rewrite recurrence —
+ *     exactly the evidence the S1->S2->S3 walk collects (III.B.2); inside
+ *     the paper's evaluated regime this path is behaviorally
+ *     indistinguishable from residency-based confirmation.
+ *     confirm_untracked() accumulates the global counters with the same
+ *     lane/cap arithmetic as a tracked retirement so the proactive trigger
+ *     sees both paths identically.
  *   - retire_on_confirm (mimic mode, default off): the S2->S3 confirming read
  *     raises the retire signal immediately instead of waiting for one more S3
  *     read. Rationale: confirmation is complete at S3 entry by the paper's own
@@ -74,6 +98,7 @@
 #ifndef CARE_ECC_CACHE_H
 #define CARE_ECC_CACHE_H
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -111,6 +136,7 @@ public:
     uint64_t writes_s1_to_s2{0};
     uint64_t reads_s2_to_s3{0};
     uint64_t retires{0};                // retire signals raised (S3 read)
+    uint64_t retires_celog{0};          // retire signals raised by contention-free confirm (untracked repeat CE)
     uint64_t invalidated_entries{0};    // entries removed by page retirement
     // Proactive retirement (only move when proactive is enabled)
     uint64_t proactive_triggers{0};     // saturated + biased checks
@@ -143,6 +169,13 @@ public:
   // Injected error on this line: register (S1) if untracked. chip picks the
   // proactive global counter (x8 device / byte lane the fault lives in).
   RegisterOutcome on_error(uint64_t line_addr, std::size_t set, uint8_t chip = 0);
+
+  // Contention-free confirmation (header rationale above): the caller
+  // observed a REPEAT CE on an untracked line of this set — confirmed hard.
+  // Returns a retire outcome and accumulates the set's global counters with
+  // the same lane/cap arithmetic as a tracked retirement (proactive fields
+  // filled when the trigger fires). The caller retires the page.
+  ReadOutcome confirm_untracked(std::size_t set, uint8_t chip);
 
   // Page retirement: drop every entry inside the 2MB page (and forget the
   // page in every set's observed-error list). Returns entry count.
@@ -184,9 +217,20 @@ private:
 
   static constexpr uint32_t ERR_COUNT_CAP = 255;
 
-  // Accumulate the retiring entry into its set's global counters; fills the
-  // outcome's proactive/biased_chip/bias fields when the trigger fires.
-  void account_retirement(std::size_t set, const Entry& e, ReadOutcome& out);
+  // Accumulate a retirement into its set's global counters (contrib into the
+  // chip's lane); fills the outcome's proactive/biased_chip/bias fields when
+  // the trigger fires. Shared by tracked (S3 read) and celog retirements.
+  void account_retirement(std::size_t set, uint8_t chip_idx, uint32_t contrib, ReadOutcome& out);
+  // Global-counter contribution of a retiring block. retire_on_confirm (and
+  // celog): the compressed pipeline observes a retiring block exactly twice
+  // (register + confirming read) where the paper's flow accumulates >= 3 —
+  // contribute the full 2-bit cap so the paper's trigger arithmetic
+  // (15/3 = 5 same-chip retirements per proactive) is preserved instead of
+  // silently becoming 15/2 = 8.
+  uint32_t retire_contrib(uint32_t err_count) const
+  {
+    return retire_on_confirm_ ? LOCAL_CONTRIB_CAP : std::min(err_count, LOCAL_CONTRIB_CAP);
+  }
 
   std::size_t sets_;
   std::size_t ways_;

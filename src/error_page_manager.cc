@@ -695,54 +695,61 @@ CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t c
     }
 
     if (out.retire) {
-        uint64_t page_base = get_page_base_pa(pa);
-
-        // Proactive victim list must be collected before any invalidation:
-        // the triggering page is still in the observed list here.
-        std::vector<uint64_t> proactive_victims;
-        if (out.proactive) {
-            proactive_victims = care_region_victims
-                ? care_region_victim_pages(row >> care_row_group_shift)   // paper-literal
-                : care_cache->region_error_pages(set);                    // evidence-based
-        }
-
-        size_t invalidated = care_cache->invalidate_page(page_base);
-        retire_page(page_base, /*queue_llc_sweep=*/false);  // coverage move + counter erase; no sweep consumer under CARE
-        stat_care_retirement_count++;
-        per_cpu_error_stats[cpu_idx].care_retirements++;
-        // Always-on event log (plan P3b): reactive retirements are rare
-        // (tens per run) so this is grep-friendly signal, not noise.
-        fmt::print("[CARE][RETIRE] page=0x{:x} trigger_cl=0x{:x} set={} chip={} err_count={} cpu={} ecc_invalidated={}\n",
-                   page_base, cl_addr, set, out.entry_chip, out.entry_err_count, cpu_idx, invalidated);
-
-        if (out.proactive) {
-            // Paper III.C: retire everything the set protects. The batch is a
-            // synchronous offline: each victim adds one page-offline penalty to
-            // the triggering packet (handoff via last_proactive_victims — the
-            // interrupted core pays migration of the whole batch).
-            for (uint64_t victim : proactive_victims) {
-                if (victim == page_base) continue;
-                if (clustered_retired_pages.count(victim) > 0) continue;  // already permanently retired
-                size_t v_inv = care_cache->invalidate_page(victim);
-                retire_page(victim, /*queue_llc_sweep=*/false);
-                stat_care_proactive_page_count++;
-                last_proactive_victims++;
-                if (debug == 1) {
-                    fmt::print("[CARE] PROACTIVE RETIRE page=0x{:x} (set {}) ecc_entries_invalidated={}\n",
-                               victim, set, v_inv);
-                }
-            }
-            // Always-on event log (plan P3b): region = (bank, row-group)
-            fmt::print("[CARE][PROACTIVE] mode={} set={} biased_chip={} bias={} bank_key=0x{:x} row_group={} victims={} pages=[",
-                       care_region_victims ? "region" : "observed",
-                       set, out.biased_chip, out.bias, bank_key, row >> care_row_group_shift, proactive_victims.size());
-            for (size_t i = 0; i < proactive_victims.size(); i++) {
-                fmt::print("{}0x{:x}", i ? " " : "", proactive_victims[i]);
-            }
-            fmt::print("]\n");
-        }
+        care_execute_retirement(pa, cpu_idx, bank_key, row, set, out, "s3read");
     }
     return out;
+}
+
+void ErrorPageManager::care_execute_retirement(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row,
+                                               size_t set, const CareEccCache::ReadOutcome& out, const char* src) {
+    uint64_t cl_addr = get_cache_line_addr(pa);
+    uint64_t page_base = get_page_base_pa(pa);
+    last_proactive_victims = 0;   // handoff to service_packet: victims of THIS retirement only
+
+    // Proactive victim list must be collected before any invalidation:
+    // the triggering page is still in the observed list here.
+    std::vector<uint64_t> proactive_victims;
+    if (out.proactive) {
+        proactive_victims = care_region_victims
+            ? care_region_victim_pages(row >> care_row_group_shift)   // paper-literal
+            : care_cache->region_error_pages(set);                    // evidence-based
+    }
+
+    size_t invalidated = care_cache->invalidate_page(page_base);
+    retire_page(page_base, /*queue_llc_sweep=*/false);  // coverage move + counter erase; no sweep consumer under CARE
+    stat_care_retirement_count++;
+    per_cpu_error_stats[cpu_idx].care_retirements++;
+    // Always-on event log (plan P3b): reactive retirements are rare
+    // (tens per run) so this is grep-friendly signal, not noise.
+    fmt::print("[CARE][RETIRE] page=0x{:x} trigger_cl=0x{:x} set={} chip={} err_count={} cpu={} ecc_invalidated={} src={}\n",
+               page_base, cl_addr, set, out.entry_chip, out.entry_err_count, cpu_idx, invalidated, src);
+
+    if (out.proactive) {
+        // Paper III.C: retire everything the set protects. The batch is a
+        // synchronous offline: each victim adds one page-offline penalty to
+        // the triggering packet (handoff via last_proactive_victims — the
+        // interrupted core pays migration of the whole batch).
+        for (uint64_t victim : proactive_victims) {
+            if (victim == page_base) continue;
+            if (clustered_retired_pages.count(victim) > 0) continue;  // already permanently retired
+            size_t v_inv = care_cache->invalidate_page(victim);
+            retire_page(victim, /*queue_llc_sweep=*/false);
+            stat_care_proactive_page_count++;
+            last_proactive_victims++;
+            if (debug == 1) {
+                fmt::print("[CARE] PROACTIVE RETIRE page=0x{:x} (set {}) ecc_entries_invalidated={}\n",
+                           victim, set, v_inv);
+            }
+        }
+        // Always-on event log (plan P3b): region = (bank, row-group)
+        fmt::print("[CARE][PROACTIVE] mode={} set={} biased_chip={} bias={} bank_key=0x{:x} row_group={} victims={} pages=[",
+                   care_region_victims ? "region" : "observed",
+                   set, out.biased_chip, out.bias, bank_key, row >> care_row_group_shift, proactive_victims.size());
+        for (size_t i = 0; i < proactive_victims.size(); i++) {
+            fmt::print("{}0x{:x}", i ? " " : "", proactive_victims[i]);
+        }
+        fmt::print("]\n");
+    }
 }
 
 void ErrorPageManager::care_on_write(uint64_t pa, uint64_t bank_key, uint64_t row) {
@@ -753,20 +760,39 @@ void ErrorPageManager::care_on_write(uint64_t pa, uint64_t bank_key, uint64_t ro
     }
 }
 
-void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row) {
+bool ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row) {
     uint64_t cl_addr = get_cache_line_addr(pa);
 
-    // Ground-truth faulty-line set for the Protection Coverage metric (D8).
+    // Ground-truth faulty-line set for the Protection Coverage metric (D8) —
+    // and, under celog-confirm, the model's stand-in for the MC CE log: a
+    // failed insert means this line has errored before (repeat CE).
     // LLC pinning consumers of error_addresses are all is_cache_pinning_enabled()-gated.
     // Note: like the baseline path, a line of an already-retired page re-enters this
     // set on re-injection while staying in retired_error_addresses — a shared
     // simulation artifact across schemes (coverage double-count, plan D5).
-    error_addresses.insert(cl_addr);
+    bool repeat = !error_addresses.insert(cl_addr).second;
 
     auto& s = per_cpu_error_stats[cpu_idx];
     s.errors_absorbed++;
 
     size_t set = care_set_index(bank_key, row);
+
+    // Contention-free confirmation ("celog", rationale in care_ecc_cache.h):
+    // a repeat CE on an untracked line carries the same evidence as the
+    // tracked S2->S3 walk — demand scrubbing rewrote the line after its first
+    // CE regardless of admission (paper p.533 fn.1), so this CE is a
+    // post-rewrite recurrence = confirmed hard (III.B.2). Admission bounds
+    // protection (BCH), not the verdict; the paper's own evaluation runs
+    // where sets never contend, so there this path never diverges from
+    // residency-based confirmation. Gated on demand scrubbing: without the
+    // scrub write the second CE is not post-rewrite evidence.
+    if (care_celog_confirm && care_demand_scrub && repeat && !care_cache->is_tracked(cl_addr, set)) {
+        auto out = care_cache->confirm_untracked(set, last_consumed_chip);
+        s.care_celog_retirements++;
+        care_execute_retirement(pa, cpu_idx, bank_key, row, set, out, "celog");
+        return true;
+    }
+
     switch (care_cache->on_error(cl_addr, set, last_consumed_chip)) {
     case CareEccCache::RegisterOutcome::REGISTERED:
         s.care_registered++;
@@ -786,6 +812,7 @@ void ErrorPageManager::care_on_injected_error(uint64_t pa, uint32_t cpu_idx, uin
         if (debug == 1) fmt::print("[CARE] KNOWN addr=0x{:x} (already tracked)\n", cl_addr);
         break;
     }
+    return false;
 }
 
 void ErrorPageManager::print_care_stats() const {
@@ -796,7 +823,10 @@ void ErrorPageManager::print_care_stats() const {
     const auto& s = care_cache->stats();
     size_t capacity = care_ecc_sets * care_ecc_ways;
     size_t resident = care_cache->occupancy();
-    uint64_t error_events = s.registered + s.errors_on_tracked + s.dropped;
+    // Repeat-CE confirmations consume an injected error without reaching
+    // on_error (they retire instead) — count them so the total is the true
+    // consumed-CE count. Zero when celog is off (legacy totals unchanged).
+    uint64_t error_events = s.registered + s.errors_on_tracked + s.dropped + s.retires_celog;
 
     fmt::print("\n[CARE] ========== CARE Scheme Statistics ==========\n");
     fmt::print("[CARE]\n");
@@ -809,6 +839,9 @@ void ErrorPageManager::print_care_stats() const {
     fmt::print("[CARE]     Registrations (new S1):       {}\n", s.registered);
     fmt::print("[CARE]     On Already-Tracked Blocks:    {}\n", s.errors_on_tracked);
     fmt::print("[CARE]     Dropped (set full):           {}\n", s.dropped);
+    if (care_celog_confirm && care_demand_scrub) {
+        fmt::print("[CARE]     Repeat-CE Confirms (retired): {}\n", s.retires_celog);
+    }
     fmt::print("[CARE]\n");
     fmt::print("[CARE] [Tracked-Block Accesses]\n");
     fmt::print("[CARE]   BCH Decode Reads (+{} cyc):     {}\n", care_bch_decode_cycles, s.decode_reads);
@@ -817,6 +850,12 @@ void ErrorPageManager::print_care_stats() const {
     fmt::print("[CARE]\n");
     fmt::print("[CARE] [Retirement]\n");
     fmt::print("[CARE]   Pages Retired (reactive):       {}\n", stat_care_retirement_count);
+    // Breakdown by confirmation path (celog-confirm mimic). Printed only when
+    // the celog path is armed so legacy configs keep byte-identical output.
+    if (care_celog_confirm && care_demand_scrub) {
+        fmt::print("[CARE]     via S3-Read Confirm:          {}\n", s.retires);
+        fmt::print("[CARE]     via Repeat-CE Confirm:        {}\n", s.retires_celog);
+    }
     if (care_proactive) {
         fmt::print("[CARE]\n");
         fmt::print("[CARE] [Proactive Retirement]\n");
@@ -899,8 +938,8 @@ void ErrorPageManager::print_per_cpu_error_stats() const {
         // Existing line above stays byte-identical for non-CARE runs; care fields
         // appear on a separate gated line only.
         if (care_enabled) {
-            fmt::print("[ERROR]   CPU {}: care_registered={} care_dropped={} care_retired={}\n",
-                       cpu_idx, s.care_registered, s.care_dropped, s.care_retirements);
+            fmt::print("[ERROR]   CPU {}: care_registered={} care_dropped={} care_retired={} care_celog_retired={}\n",
+                       cpu_idx, s.care_registered, s.care_dropped, s.care_retirements, s.care_celog_retirements);
         }
     }
 }

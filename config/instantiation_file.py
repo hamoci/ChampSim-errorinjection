@@ -518,6 +518,11 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, error_page_manager,
         # Emitted only when true: scrub-off care configs keep byte-identical generated code
         if error_page_manager.get('care_demand_scrub', False):
             yield '  epm.set_care_demand_scrub(true);'
+        # MC CE-log confirmation mimic (default ON in-code; effective only with
+        # demand scrubbing). Emitted only when false so existing configs keep
+        # byte-identical generated code.
+        if not bool(error_page_manager.get('care_celog_confirm', True)):
+            yield '  epm.set_care_celog_confirm(false);'
         if error_page_manager.get('care_proactive', False):
             yield '  epm.set_care_proactive(true);'
         # Trigger condition: OR (default) fires on saturation or bias alone;

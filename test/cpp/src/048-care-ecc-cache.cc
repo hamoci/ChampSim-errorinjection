@@ -381,3 +381,83 @@ TEST_CASE("Retire-on-confirmation mimic: full-cap contribution keeps the paper's
   REQUIRE(ecc.stats().proactive_triggers == 1);
   REQUIRE(ecc.global_counter(0, 0) == 0); // round closed
 }
+
+TEST_CASE("CE-log confirmation: an untracked repeat retires without touching residency")
+{
+  CareEccCache ecc{4, 2, /*proactive_enabled=*/true, /*or_trigger=*/false, /*retire_on_confirm=*/true};
+  const std::size_t set = 2;
+
+  auto out = ecc.confirm_untracked(set, /*chip=*/5);
+  REQUIRE(out.retire);
+  REQUIRE(out.entry_chip == 5);
+  REQUIRE(out.entry_err_count == 2); // register CE + confirming repeat CE
+  REQUIRE(ecc.stats().retires_celog == 1);
+  REQUIRE(ecc.stats().retires == 0);      // S3-read path untouched
+  REQUIRE(ecc.occupancy() == 0);          // no entry was ever created
+  REQUIRE(ecc.global_counter(set, 5) == CareEccCache::LOCAL_CONTRIB_CAP);
+}
+
+TEST_CASE("CE-log confirmation: chip index folds into the eight global-counter lanes")
+{
+  CareEccCache ecc{4, 2, /*proactive_enabled=*/true, /*or_trigger=*/false, /*retire_on_confirm=*/true};
+
+  auto out = ecc.confirm_untracked(0, /*chip=*/9); // 9 % 8 == lane 1
+  REQUIRE(out.entry_chip == 1);
+  REQUIRE(ecc.global_counter(0, 1) == CareEccCache::LOCAL_CONTRIB_CAP);
+}
+
+TEST_CASE("CE-log confirmation keeps the paper's five-retirement proactive arithmetic")
+{
+  CareEccCache ecc{1, 2, /*proactive_enabled=*/true, /*or_trigger=*/false, /*retire_on_confirm=*/true};
+
+  for (int i = 0; i < 4; ++i) {
+    auto out = ecc.confirm_untracked(0, /*chip=*/3);
+    REQUIRE_FALSE(out.proactive); // 3*(i+1) <= 12 < 15
+  }
+  REQUIRE(ecc.global_counter(0, 3) == 12);
+
+  auto out = ecc.confirm_untracked(0, /*chip=*/3);
+  REQUIRE(out.proactive); // 5 x 3 = 15 saturates; bias 15 >= 12
+  REQUIRE(out.biased_chip == 3);
+  REQUIRE(ecc.stats().proactive_triggers == 1);
+  REQUIRE(ecc.global_counter(0, 3) == 0); // round closed
+}
+
+TEST_CASE("CE-log and tracked retirements accumulate into the same lane")
+{
+  // 2 tracked confirmations + 3 celog confirmations on one chip reach the
+  // trigger together: both paths share account_retirement so the proactive
+  // arithmetic cannot diverge between them.
+  CareEccCache ecc{1, 2, /*proactive_enabled=*/true, /*or_trigger=*/false, /*retire_on_confirm=*/true};
+
+  for (int i = 0; i < 2; ++i) {
+    REQUIRE(ecc.on_error(line_tag(200 + i), 0, /*chip=*/6) == CareEccCache::RegisterOutcome::REGISTERED);
+    REQUIRE(ecc.on_write(line_tag(200 + i), 0));
+    auto out = ecc.on_read(line_tag(200 + i), 0);
+    REQUIRE(out.retire);
+    REQUIRE_FALSE(out.proactive);
+    ecc.invalidate_page(line_tag(200 + i) & CareEccCache::PAGE_BASE_MASK);
+  }
+  REQUIRE(ecc.global_counter(0, 6) == 6);
+
+  REQUIRE_FALSE(ecc.confirm_untracked(0, 6).proactive); // 9
+  REQUIRE_FALSE(ecc.confirm_untracked(0, 6).proactive); // 12
+  auto out = ecc.confirm_untracked(0, 6);               // 15: saturated + biased
+  REQUIRE(out.proactive);
+  REQUIRE(out.biased_chip == 6);
+  REQUIRE(ecc.stats().retires == 2);
+  REQUIRE(ecc.stats().retires_celog == 3);
+}
+
+TEST_CASE("Proactive disabled: CE-log confirmations leave global counters untouched")
+{
+  CareEccCache ecc{4, 2, /*proactive_enabled=*/false, /*or_trigger=*/false, /*retire_on_confirm=*/true};
+
+  auto out = ecc.confirm_untracked(1, /*chip=*/4);
+  REQUIRE(out.retire);
+  REQUIRE_FALSE(out.proactive);
+  REQUIRE(ecc.stats().retires_celog == 1);
+  for (std::size_t lane = 0; lane < CareEccCache::NUM_GLOBAL_COUNTERS; ++lane) {
+    REQUIRE(ecc.global_counter(1, lane) == 0);
+  }
+}

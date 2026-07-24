@@ -106,6 +106,7 @@ def error_page_manager_defaults():
         'baseline_retirement_threshold': 1,
         'care': False,
         'care_demand_scrub': False,
+        'care_celog_confirm': True,
         'care_proactive': False,
         'care_proactive_or': True,
         'care_proactive_victims': 'observed',

@@ -448,8 +448,24 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
             // background work — the consuming read itself pays nothing (plan D2).
             // The chip (byte lane) comes from the consumed fault via the EPM
             // handoff; coordinates feed the paper set index.
-            epm.care_on_injected_error(raw_pa, pkt->value().cpu, err_bank_key, op_row);
+            const bool celog_retired = epm.care_on_injected_error(raw_pa, pkt->value().cpu, err_bank_key, op_row);
             epm.record_error_access();
+            if (celog_retired) {
+              // Repeat-CE confirmation retired the page on this read: charge the
+              // same page-offline cost as the tracked-confirm path above,
+              // including the proactive victim batch. The line was untracked, so
+              // the care hook left error_latency at zero — overwrite is exact.
+              // The care_latency memo must carry the charge so a swap_write_mode
+              // re-service keeps it.
+              error_latency = (pkt->value().type == access_type::TRANSLATION) ? epm.get_pte_error_latency() : epm.get_error_latency();
+              error_latency += epm.get_last_proactive_victims() * epm.get_error_latency();
+              pkt->value().care_latency = error_latency;
+              care_retired_now = true;
+              if (debug_dynamic_error_latency) {
+                fmt::print("[ERR_LAT][CYCLE][CARE][CELOG] addr=0x{:x} cpu={} latency={} cycles\n",
+                           raw_pa, pkt->value().cpu, to_cpu_cycles(error_latency));
+              }
+            }
           }
         } else if (ErrorPageManager::get_instance().consume_cycle_error(raw_pa, err_bank_key, op_row)) {
           if (epm.is_cache_pinning_enabled()) {
@@ -602,6 +618,9 @@ void MEMORY_CONTROLLER::initialize()
     if (epm.is_care_retire_on_confirm()) {
       fmt::print("[ERROR_PAGE_MANAGER] CARE retire-on-confirm mimic: ON (S2->S3 confirming read retires; gc contribution fixed at {})\n",
                  CareEccCache::LOCAL_CONTRIB_CAP);
+    }
+    if (epm.is_care_celog_confirm() && epm.is_care_demand_scrub()) {
+      fmt::print("[ERROR_PAGE_MANAGER] CARE contention-free confirm mimic: ON (repeat CE on untracked line confirms hard)\n");
     }
     if (epm.is_care_proactive()) {
       fmt::print("[ERROR_PAGE_MANAGER] CARE proactive retirement: ON (8x4-bit global counters/set, saturate {} + bias >= {})\n",
