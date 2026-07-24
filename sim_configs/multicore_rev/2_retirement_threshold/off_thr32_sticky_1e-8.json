@@ -171,7 +171,7 @@
     "data_page_fault_2mb": 109201,
     "randomization": 1
   },
-  "executable_name": "champsim_rev_off_thr32",
+  "executable_name": "champsim_rev_off_thr32_1e-8",
   "error_page_manager": {
     "mode": "CYCLE",
     "cache_pinning": false,

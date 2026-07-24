@@ -171,16 +171,16 @@
     "data_page_fault_2mb": 109201,
     "randomization": 1
   },
-  "executable_name": "champsim_rev_pin_thr16_1e-8",
+  "executable_name": "champsim_rev_pin_thr4_1e-5",
   "error_page_manager": {
     "mode": "CYCLE",
     "cache_pinning": true,
     "dynamic_error_latency": true,
     "error_latency_penalty": 454568,
-    "retirement_threshold": 16,
+    "retirement_threshold": 4,
     "max_error_ways_per_set": 8,
     "debug": 0,
-    "error_cycle_interval": 144000,
+    "error_cycle_interval": 144000000,
     "error_spatial_model": "sticky",
     "error_seed": 54321,
     "fault_density_bank": 0.05
