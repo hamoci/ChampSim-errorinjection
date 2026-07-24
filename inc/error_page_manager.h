@@ -290,6 +290,11 @@ private:
     // Chip (byte lane) of the most recently consumed injected error — handoff
     // from consume_cycle_error to care_on_injected_error (same service call).
     uint8_t last_consumed_chip{0};
+    // Victim pages retired by the proactive batch of the CURRENT care_on_read call
+    // — handoff to service_packet, which charges one page-offline penalty per
+    // victim on the triggering packet (synchronous batched offline; the
+    // interrupted core pays the whole batch). Reset at every care_on_read entry.
+    uint64_t last_proactive_victims{0};
     uint64_t stat_care_retirement_count{0};
     uint64_t stat_care_proactive_page_count{0};  // pages retired by proactive batches
 
@@ -490,6 +495,10 @@ public:
 
     // Every DRAM read (first service of the packet): decode latency / retirement decision.
     CareEccCache::ReadOutcome care_on_read(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row);
+    // Victims retired by the proactive batch of the LAST care_on_read call (0 when
+    // it did not fire). service_packet multiplies this into the trigger's
+    // page-offline latency so batched offlining is no longer free.
+    uint64_t get_last_proactive_victims() const { return last_proactive_victims; }
     // Every DRAM write (first service): S1→S2 confirmation.
     void care_on_write(uint64_t pa, uint64_t bank_key, uint64_t row);
     // Injected error consumed by a read packet: registration attempt (no latency).

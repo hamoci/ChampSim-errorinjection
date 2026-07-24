@@ -687,6 +687,7 @@ std::vector<uint64_t> ErrorPageManager::care_region_victim_pages(uint64_t row_gr
 CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t cpu_idx, uint64_t bank_key, uint64_t row) {
     uint64_t cl_addr = get_cache_line_addr(pa);
     size_t set = care_set_index(bank_key, row);
+    last_proactive_victims = 0;   // handoff to service_packet: victims of THIS call only
     auto out = care_cache->on_read(cl_addr, set);
 
     if (debug == 1 && out.promoted_s3) {
@@ -715,15 +716,17 @@ CareEccCache::ReadOutcome ErrorPageManager::care_on_read(uint64_t pa, uint32_t c
                    page_base, cl_addr, set, out.entry_chip, out.entry_err_count, cpu_idx, invalidated);
 
         if (out.proactive) {
-            // Paper III.C: retire everything the set protects. The triggering
-            // packet's single page-offline latency stands in for the batched
-            // interrupt (cost under-counted; trigger count is the metric here).
+            // Paper III.C: retire everything the set protects. The batch is a
+            // synchronous offline: each victim adds one page-offline penalty to
+            // the triggering packet (handoff via last_proactive_victims — the
+            // interrupted core pays migration of the whole batch).
             for (uint64_t victim : proactive_victims) {
                 if (victim == page_base) continue;
                 if (clustered_retired_pages.count(victim) > 0) continue;  // already permanently retired
                 size_t v_inv = care_cache->invalidate_page(victim);
                 retire_page(victim, /*queue_llc_sweep=*/false);
                 stat_care_proactive_page_count++;
+                last_proactive_victims++;
                 if (debug == 1) {
                     fmt::print("[CARE] PROACTIVE RETIRE page=0x{:x} (set {}) ecc_entries_invalidated={}\n",
                                victim, set, v_inv);

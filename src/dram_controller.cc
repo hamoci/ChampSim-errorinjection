@@ -410,8 +410,12 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
             auto care_read = epm.care_on_read(raw_pa, pkt->value().cpu, err_bank_key, op_row);
             care_retired_now = care_read.retire;
             if (care_read.retire) {
-              // Page-offline cost, same rule as the baseline retirement branch below
+              // Page-offline cost, same rule as the baseline retirement branch below.
+              // A proactive batch is a synchronous offline: every victim page adds one
+              // more page-offline penalty on this trigger packet (the interrupted core
+              // pays migration of the whole batch — victims are no longer free).
               error_latency = (pkt->value().type == access_type::TRANSLATION) ? epm.get_pte_error_latency() : epm.get_error_latency();
+              error_latency += epm.get_last_proactive_victims() * epm.get_error_latency();
             } else if (care_read.tracked) {
               error_latency = epm.get_care_bch_decode_latency();
             }
