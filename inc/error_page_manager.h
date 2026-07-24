@@ -211,6 +211,21 @@ private:
     uint64_t next_error_cycle{0};
     std::vector<FaultDomain> faults;
     std::vector<size_t> live_fault_indices;       // reuse-sampling pool (dead excluded)
+    // --- STICKY hot-path acceleration (behavior-preserving) ----------------
+    // consume_sticky_error() runs on every DRAM read and originally scanned the
+    // whole live_fault_indices list twice (anchor loop + match loop), an O(N)
+    // cost that grows with the (never-pruned) BANK-fault population. These two
+    // secondary indices remove that cost WITHOUT changing which fault "wins":
+    //   * sticky_unanchored: live faults not yet anchored, in birth order. The
+    //     anchor loop scans only these (anchoring removes the fault from here).
+    //   * sticky_anchored_by_bank: anchored live faults bucketed by bank_key,
+    //     each bucket kept sorted ascending by fault index (== birth order ==
+    //     the order a full scan of live_fault_indices would visit them). Every
+    //     match condition (CELL/ROW/BANK) implies bank_key equality, so the
+    //     match loop only needs the current read's bucket and still returns the
+    //     same first match. Maintained only under STICKY; empty otherwise.
+    std::vector<size_t> sticky_unanchored;
+    std::unordered_map<uint64_t, std::vector<size_t>> sticky_anchored_by_bank;
     std::vector<PendingManifest> pending_manifests;
     // Pages permanently retired (hard-fault semantics): errors are never
     // recorded against a retired page again — its PA now stands for the
